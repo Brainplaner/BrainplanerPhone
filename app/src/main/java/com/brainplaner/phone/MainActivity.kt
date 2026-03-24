@@ -130,7 +130,6 @@ class MainActivity : ComponentActivity() {
                     userId = userId,
                     apiUrl = CLOUD_API_URL,
                     userToken = USER_TOKEN,
-                    supabaseUrl = SUPABASE_URL,
                     getActiveSessionId = { activeSessionId },
                     onStartSession = { minutes -> startSession(minutes) },
                     onStopSession = { stopSession() },

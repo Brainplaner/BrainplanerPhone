@@ -29,7 +29,6 @@ class HomeViewModel(
     private val userId: String,
     private val apiUrl: String,
     private val userToken: String,
-    private val supabaseUrl: String,
 ) : ViewModel() {
 
     // Reuse the same OkHttp pattern already established in MainActivity.
@@ -113,19 +112,20 @@ class HomeViewModel(
     }
 
     // Returns true if there is already a daily_inputs row for today (UTC date).
+    // Checked via the /readiness endpoint — has_checkin_today is included in the response.
     private suspend fun fetchCheckedInToday(): Boolean = withContext(Dispatchers.IO) {
         try {
-            val today = java.time.LocalDate.now().toString() // yyyy-MM-dd
             val request = Request.Builder()
-                .url("$supabaseUrl/rest/v1/daily_inputs?user_id=eq.$userId&date=eq.$today&select=id&limit=1")
+                .url("$apiUrl/readiness")
                 .get()
-                .addHeader("apikey", userToken)
                 .addHeader("Authorization", "Bearer $userToken")
+                .addHeader("X-User-ID", userId)
                 .build()
             client.newCall(request).execute().use { response ->
                 if (response.isSuccessful) {
-                    val body = response.body?.string() ?: "[]"
-                    body.trim() != "[]"
+                    val body = response.body?.string() ?: return@use false
+                    Regex(""""has_checkin_today"\s*:\s*(true|false)""").find(body)
+                        ?.groupValues?.get(1) == "true"
                 } else false
             }
         } catch (e: Exception) {
@@ -133,24 +133,21 @@ class HomeViewModel(
         }
     }
 
-    // Posts (or upserts) today's sleep check-in to Supabase. Refreshes the full state on success.
+    // Posts today's sleep check-in via Cloud API (avoids Supabase RLS with anon key).
     fun submitCheckIn(sleepHours: Float, sleepScore: Int, rhr: Int?) {
         viewModelScope.launch {
             _state.value = _state.value.copy(isCheckInSubmitting = true)
             val success = withContext(Dispatchers.IO) {
                 try {
-                    val today = java.time.LocalDate.now().toString()
                     val rhrJson = if (rhr != null) ""","rhr":$rhr""" else ""
-                    val json = """{"user_id":"$userId","date":"$today","sleep_hours":$sleepHours,"sleep_score":$sleepScore$rhrJson}"""
+                    val json = """{"sleep_hours":$sleepHours,"sleep_score":$sleepScore$rhrJson}"""
                     val body = json.toRequestBody("application/json".toMediaType())
                     val request = Request.Builder()
-                        .url("$supabaseUrl/rest/v1/daily_inputs")
+                        .url("$apiUrl/readiness/checkin")
                         .post(body)
-                        .addHeader("apikey", userToken)
                         .addHeader("Authorization", "Bearer $userToken")
+                        .addHeader("X-User-ID", userId)
                         .addHeader("Content-Type", "application/json")
-                        // Upsert: if a row already exists for this user+date, update it.
-                        .addHeader("Prefer", "resolution=merge-duplicates,return=minimal")
                         .build()
                     client.newCall(request).execute().use { it.isSuccessful }
                 } catch (e: Exception) {
@@ -158,7 +155,6 @@ class HomeViewModel(
                 }
             }
             if (success) {
-                // Re-fetch so readiness can update once the backend endpoint exists.
                 load()
             } else {
                 _state.value = _state.value.copy(isCheckInSubmitting = false)
@@ -167,11 +163,11 @@ class HomeViewModel(
     }
 
     companion object {
-        fun factory(userId: String, apiUrl: String, userToken: String, supabaseUrl: String) =
+        fun factory(userId: String, apiUrl: String, userToken: String) =
             object : ViewModelProvider.Factory {
                 @Suppress("UNCHECKED_CAST")
                 override fun <T : ViewModel> create(modelClass: Class<T>): T =
-                    HomeViewModel(userId, apiUrl, userToken, supabaseUrl) as T
+                    HomeViewModel(userId, apiUrl, userToken) as T
             }
     }
 }

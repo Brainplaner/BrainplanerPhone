@@ -24,7 +24,6 @@ fun AppNavigation(
     userId: String,
     apiUrl: String,
     userToken: String,
-    supabaseUrl: String,
     getActiveSessionId: () -> String?,
     onStartSession: suspend (plannedMinutes: Int) -> Result<String>,
     onStopSession: suspend () -> Result<String>,
@@ -37,7 +36,7 @@ fun AppNavigation(
     NavHost(navController = navController, startDestination = Screen.Home.route) {
         composable(Screen.Home.route) {
             val vm: HomeViewModel = viewModel(
-                factory = HomeViewModel.factory(userId, apiUrl, userToken, supabaseUrl)
+                factory = HomeViewModel.factory(userId, apiUrl, userToken)
             )
             HomeScreen(
                 viewModel = vm,
