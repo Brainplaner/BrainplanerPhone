@@ -21,9 +21,10 @@ data class HomeUiState(
     val coachWhisper: String? = null,
     val handoffNextAction: String? = null,
     val readinessScore: String? = null,
+    val planningAccuracyLine: String? = null,  // e.g. "Yesterday: 45→52 min (overrun +7)"
     val hasCheckedInToday: Boolean = false,
     val isCheckInSubmitting: Boolean = false,
-    val checkInError: String? = null,      // non-null when last submit failed
+    val checkInError: String? = null,
 )
 
 class HomeViewModel(
@@ -49,13 +50,14 @@ class HomeViewModel(
     fun load() {
         viewModelScope.launch {
             _state.value = HomeUiState(isLoading = true)
-            // Single /readiness call gives both score and has_checkin_today.
+            // Single /readiness call gives score, has_checkin_today, and yesterday's accuracy.
             val brief = async { fetchBrief() }
             val readinessData = async { fetchReadinessData() }
-            val (score, hasCheckin) = readinessData.await()
+            val (score, hasCheckin, planningLine) = readinessData.await()
             _state.value = brief.await().copy(
                 readinessScore = score,
                 hasCheckedInToday = hasCheckin,
+                planningAccuracyLine = planningLine,
             )
         }
     }
@@ -90,8 +92,8 @@ class HomeViewModel(
     private fun extractString(json: String, key: String): String? =
         Regex(""""$key"\s*:\s*"([^"]+)"""").find(json)?.groupValues?.get(1)
 
-    // Single call to /readiness — returns (scoreString, hasCheckinToday).
-    private suspend fun fetchReadinessData(): Pair<String?, Boolean> = withContext(Dispatchers.IO) {
+    // Single call to /readiness — returns (scoreString, hasCheckinToday, planningAccuracyLine).
+    private suspend fun fetchReadinessData(): Triple<String?, Boolean, String?> = withContext(Dispatchers.IO) {
         try {
             val request = Request.Builder()
                 .url("$apiUrl/readiness")
@@ -101,16 +103,31 @@ class HomeViewModel(
                 .build()
             client.newCall(request).execute().use { response ->
                 if (response.isSuccessful) {
-                    val body = response.body?.string() ?: return@use Pair(null, false)
+                    val body = response.body?.string() ?: return@use Triple(null, false, null)
                     val score = Regex(""""score"\s*:\s*(\d+)""").find(body)?.groupValues?.get(1)
                     val hasCheckin = Regex(""""has_checkin_today"\s*:\s*(true|false)""")
                         .find(body)?.groupValues?.get(1) == "true"
-                    Pair(score, hasCheckin)
-                } else Pair(null, false)
+                    val line = buildPlanningAccuracyLine(body)
+                    Triple(score, hasCheckin, line)
+                } else Triple(null, false, null)
             }
         } catch (e: Exception) {
-            Pair(null, false)
+            Triple(null, false, null)
         }
+    }
+
+    private fun buildPlanningAccuracyLine(json: String): String? {
+        val planned = Regex(""""yesterday_planned_minutes"\s*:\s*(\d+)""").find(json)?.groupValues?.get(1)?.toIntOrNull()
+            ?: return null
+        val actual = Regex(""""yesterday_actual_minutes"\s*:\s*(\d+)""").find(json)?.groupValues?.get(1)?.toIntOrNull()
+            ?: return null
+        val diff = actual - planned
+        val verdict = when {
+            diff > 5  -> "overrun +${diff}m"
+            diff < -5 -> "underrun ${diff}m"
+            else      -> "on target"
+        }
+        return "Yesterday: ${planned}m planned → ${actual}m actual ($verdict)"
     }
 
     // Posts today's sleep check-in via Cloud API (avoids Supabase RLS with anon key).
