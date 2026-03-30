@@ -122,6 +122,14 @@ class MainActivity : ComponentActivity() {
         // Start polling service in background to detect PC-initiated sessions
         PhoneAwarenessService.startPollingMode(this)
 
+        // If the app process was restarted during an active session, resume tracking immediately.
+        LocalStore.getActiveSession(this)?.let { localSession ->
+            activeSessionId = localSession.id
+            activePlannedMinutes = localSession.plannedMinutes
+            PhoneAwarenessService.start(this, localSession.id)
+            android.util.Log.i("MainActivity", "Restored active session tracking: ${localSession.id}")
+        }
+
         val userId = UserAuth.getUserId(this) ?: return
 
         setContent {
@@ -138,7 +146,6 @@ class MainActivity : ComponentActivity() {
                         UserAuth.clearUserId(this)
                         recreate()
                     },
-                    onStateChanged = { callback -> uiStateCallback = callback },
                 )
             }
         }
@@ -157,206 +164,93 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // Create session directly via Supabase (fallback when Cloud API is down/misconfigured)
-    private suspend fun createSessionDirectly(userId: String, plannedMinutes: Int = 60): Result<String> = withContext(Dispatchers.IO) {
-        try {
-            val timestamp = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.US).apply {
-                timeZone = java.util.TimeZone.getTimeZone("UTC")
-            }.format(java.util.Date())
-
-            val json = """
-                {
-                  "user_id": "$userId",
-                  "start_ts": "$timestamp",
-                  "status": "active",
-                  "planned_minutes": 60
-                }
-            """.trimIndent()
-
-            val body = json.toRequestBody("application/json".toMediaType())
-            val request = Request.Builder()
-                .url("$SUPABASE_URL/rest/v1/sessions")
-                .post(body)
-                .addHeader("apikey", SUPABASE_ANON_KEY)
-                .addHeader("Authorization", "Bearer $SUPABASE_ANON_KEY")
-                .addHeader("Content-Type", "application/json")
-                .addHeader("Prefer", "return=representation")
-                .build()
-
-            client.newCall(request).execute().use { response ->
-                if (response.isSuccessful) {
-                    val responseBody = response.body?.string() ?: ""
-                    android.util.Log.i("MainActivity", "Supabase direct: $responseBody")
-
-                    // Extract session_id (it's just "id" in Supabase)
-                    val sessionId = Regex(""""id":"([^"]+)"""")
-                        .find(responseBody)
-                        ?.groupValues
-                        ?.get(1)
-
-                    if (sessionId != null) {
-                        Result.success(sessionId)
-                    } else {
-                        Result.failure(Exception("Failed to parse session ID from Supabase response"))
-                    }
-                } else {
-                    val errorBody = response.body?.string() ?: ""
-                    Result.failure(Exception("Supabase error ${response.code}: $errorBody"))
-                }
-            }
-        } catch (e: Exception) {
-            Result.failure(e)
-        }
-    }
-
-    // Start = POST to Cloud API /sessions/start
+    // LOCAL-FIRST session start: saves locally immediately, syncs to cloud in background.
     private suspend fun startSession(plannedMinutes: Int = 60): Result<String> = withContext(Dispatchers.IO) {
+        // Re-check notification permission right before tracking starts.
+        withContext(Dispatchers.Main) {
+            ensureNotificationPermission()
+        }
+
+        val userId = UserAuth.getUserId(this@MainActivity) ?: return@withContext Result.failure(
+            Exception("No user logged in")
+        )
+
+        // 1. Create a local session ID so the user can start immediately.
+        val localId = LocalStore.generateLocalSessionId()
+        LocalStore.saveSessionStart(this@MainActivity, localId, plannedMinutes, cloudSynced = false)
+        activeSessionId = localId
+        activePlannedMinutes = plannedMinutes
+        PhoneAwarenessService.start(this@MainActivity, localId)
+        android.util.Log.i("MainActivity", "Local session started: $localId")
+
+        // 2. Try cloud sync in background — upgrade local ID to cloud ID if successful.
         try {
-            val userId = UserAuth.getUserId(this@MainActivity) ?: return@withContext Result.failure(
-                Exception("No user logged in")
-            )
-
-            val url = "$CLOUD_API_URL/sessions/start"
-            android.util.Log.i("MainActivity", "Starting session for user: $userId")
-            android.util.Log.i("MainActivity", "POST $url")
-
-            val json = """
-                {
-                  "planned_minutes": $plannedMinutes
-                }
-            """.trimIndent()
-
+            val json = """{"planned_minutes": $plannedMinutes}"""
             val body = json.toRequestBody("application/json".toMediaType())
             val request = Request.Builder()
-                .url(url)
+                .url("$CLOUD_API_URL/sessions/start")
                 .post(body)
                 .addHeader("Authorization", "Bearer $USER_TOKEN")
                 .addHeader("X-User-ID", userId)
                 .addHeader("Content-Type", "application/json")
                 .build()
 
-            android.util.Log.i("MainActivity", "Sending request...")
-            client.newCall(request).execute().use { response ->
-                android.util.Log.i("MainActivity", "Response code: ${response.code}")
-
-                if (response.isSuccessful) {
-                    val responseBody = response.body?.string() ?: ""
-                    android.util.Log.i("MainActivity", "Response body: $responseBody")
-
-                    // Extract session_id from response
-                    val sessionId = Regex(""""session_id":"([^"]+)"""")
-                        .find(responseBody)
-                        ?.groupValues
-                        ?.get(1)
-
-                    if (sessionId != null) {
-                        activeSessionId = sessionId
-                        activePlannedMinutes = plannedMinutes
-                        android.util.Log.i("MainActivity", "Session started: $sessionId")
-                        // Start phone awareness tracking
-                        PhoneAwarenessService.start(this@MainActivity, sessionId)
-                        Result.success("✓ Started session\n${sessionId.take(8)}...\n📱 Tracking active")
+            val response = runCatching { client.newCall(request).execute() }.getOrNull()
+            if (response != null) {
+                response.use { res ->
+                    if (res.isSuccessful) {
+                        val responseBody = res.body?.string() ?: ""
+                        val cloudId = Regex(""""session_id":"([^"]+)"""")
+                            .find(responseBody)?.groupValues?.get(1)
+                        if (cloudId != null) {
+                            activeSessionId = cloudId
+                            LocalStore.markSessionCloudSynced(this@MainActivity, cloudId)
+                            PhoneAwarenessService.start(this@MainActivity, cloudId)
+                            android.util.Log.i("MainActivity", "Cloud session synced: $cloudId")
+                            return@withContext Result.success("✓ Session started\n${cloudId.take(8)}...")
+                        }
                     } else {
-                        android.util.Log.e("MainActivity", "Failed to parse session_id from: $responseBody")
-                        Result.failure(Exception("Created but couldn't parse session_id. Response: $responseBody"))
-                    }
-                } else {
-                    val errorBody = response.body?.string() ?: ""
-                    android.util.Log.e("MainActivity", "HTTP error ${response.code}: $errorBody")
-
-                    // 409 = active session already exists — auto-end it and retry
-                    if (response.code == 409 || (response.code == 500 && errorBody.contains("active session"))) {
-                        val staleId = Regex("""[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}""")
-                            .find(errorBody)?.value
-                        if (staleId != null) {
-                            android.util.Log.i("MainActivity", "Auto-ending stale session: $staleId")
-                            val endReq = Request.Builder()
-                                .url("$CLOUD_API_URL/sessions/$staleId/end")
-                                .post("{}".toRequestBody("application/json".toMediaType()))
-                                .addHeader("Authorization", "Bearer $USER_TOKEN")
-                                .addHeader("X-User-ID", userId)
-                                .build()
-                            runCatching { client.newCall(endReq).execute().close() }
-                            // Retry start
-                            return@withContext startSession(plannedMinutes)
+                        val errorBody = res.body?.string() ?: ""
+                        // 409 = stale session — auto-end and retry once.
+                        if (res.code == 409 || (res.code == 500 && errorBody.contains("active session", ignoreCase = true))) {
+                            val staleId = Regex("""[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}""")
+                                .find(errorBody)?.value
+                            if (staleId != null) {
+                                val endReq = Request.Builder()
+                                    .url("$CLOUD_API_URL/sessions/$staleId/end")
+                                    .post("{}".toRequestBody("application/json".toMediaType()))
+                                    .addHeader("Authorization", "Bearer $USER_TOKEN")
+                                    .addHeader("X-User-ID", userId)
+                                    .build()
+                                runCatching { client.newCall(endReq).execute().close() }
+                                // Retry start once.
+                                val retryResp = runCatching { client.newCall(request).execute() }.getOrNull()
+                                retryResp?.use { r ->
+                                    if (r.isSuccessful) {
+                                        val rb = r.body?.string() ?: ""
+                                        val cid = Regex(""""session_id":"([^"]+)"""").find(rb)?.groupValues?.get(1)
+                                        if (cid != null) {
+                                            activeSessionId = cid
+                                            LocalStore.markSessionCloudSynced(this@MainActivity, cid)
+                                            PhoneAwarenessService.start(this@MainActivity, cid)
+                                            return@withContext Result.success("✓ Session started\n${cid.take(8)}...")
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
-
-                    // Other Cloud API error - fall back to Supabase directly
-                    android.util.Log.i("MainActivity", "Cloud API error ${response.code}, falling back to Supabase")
-                    val directResult = createSessionDirectly(userId, plannedMinutes)
-                    return@withContext directResult.fold(
-                        onSuccess = { sessionId ->
-                            activeSessionId = sessionId
-                            activePlannedMinutes = plannedMinutes
-                            PhoneAwarenessService.start(this@MainActivity, sessionId)
-                            Result.success("✓ Started session (direct)\n${sessionId.take(8)}...\n📱 Tracking active")
-                        },
-                        onFailure = { Result.failure(Exception("Cloud API (${response.code}) & Supabase failed: ${it.message}")) }
-                    )
                 }
             }
         } catch (e: Exception) {
-            android.util.Log.e("MainActivity", "Exception starting session (Cloud API down?)", e)
-            android.util.Log.i("MainActivity", "Falling back to direct Supabase session creation")
-
-            // Cloud API unreachable (DNS error, timeout, etc.) - fall back to Supabase
-            val userId = UserAuth.getUserId(this@MainActivity)
-            if (userId != null) {
-                val directResult = createSessionDirectly(userId, plannedMinutes)
-                return@withContext directResult.fold(
-                    onSuccess = { sessionId ->
-                        activeSessionId = sessionId
-                        activePlannedMinutes = plannedMinutes
-                        PhoneAwarenessService.start(this@MainActivity, sessionId)
-                        Result.success("✓ Started session (direct)\n${sessionId.take(8)}...\n📱 Tracking active")
-                    },
-                    onFailure = { Result.failure(Exception("Cloud API & Supabase failed: ${it.message}")) }
-                )
-            } else {
-                Result.failure(Exception("No user logged in"))
-            }
+            android.util.Log.w("MainActivity", "Cloud sync failed for session start, running offline", e)
         }
+
+        // Cloud unavailable — session is running locally.
+        Result.success("✓ Session started (offline)\n📱 Will sync when online")
     }
 
-    // Stop session directly via Supabase (fallback when Cloud API is down)
-    private suspend fun stopSessionDirectly(sessionId: String): Result<String> = withContext(Dispatchers.IO) {
-        try {
-            val timestamp = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.US).apply {
-                timeZone = java.util.TimeZone.getTimeZone("UTC")
-            }.format(java.util.Date())
-
-            val json = """
-                {
-                  "status": "completed",
-                  "end_ts": "$timestamp"
-                }
-            """.trimIndent()
-
-            val body = json.toRequestBody("application/json".toMediaType())
-            val request = Request.Builder()
-                .url("$SUPABASE_URL/rest/v1/sessions?id=eq.$sessionId")
-                .patch(body)
-                .addHeader("apikey", SUPABASE_ANON_KEY)
-                .addHeader("Authorization", "Bearer $SUPABASE_ANON_KEY")
-                .addHeader("Content-Type", "application/json")
-                .addHeader("Prefer", "return=representation")
-                .build()
-
-            client.newCall(request).execute().use { response ->
-                if (response.isSuccessful) {
-                    Result.success("✓ Stopped session (direct)\n${sessionId.take(8)}...\n📱 Tracking stopped")
-                } else {
-                    val errorBody = response.body?.string() ?: ""
-                    Result.failure(Exception("Supabase error ${response.code}: $errorBody"))
-                }
-            }
-        } catch (e: Exception) {
-            Result.failure(e)
-        }
-    }
-
-    // Stop = POST to Cloud API /sessions/{id}/end
+    // LOCAL-FIRST session stop: clears local state immediately, syncs to cloud in background.
     private suspend fun stopSession(): Result<String> = withContext(Dispatchers.IO) {
         val id = activeSessionId
         if (id == null) {
@@ -367,60 +261,39 @@ class MainActivity : ComponentActivity() {
             Exception("No user logged in")
         )
 
-        android.util.Log.i("MainActivity", "Stopping session: $id")
-        val url = "$CLOUD_API_URL/sessions/$id/end"
+        // 1. Clear local state immediately — user is never blocked.
+        val stoppedId = id
+        activeSessionId = null
+        LocalStore.clearActiveSession(this@MainActivity)
+        PhoneAwarenessService.stop(this@MainActivity)
+        android.util.Log.i("MainActivity", "Local session stopped: $stoppedId")
 
-        val json = """
-            {
-              "planned_minutes": $activePlannedMinutes
-            }
-        """.trimIndent()
-
-        val body = json.toRequestBody("application/json".toMediaType())
-
-        val request = Request.Builder()
-            .url(url)
-            .post(body)
-            .addHeader("Authorization", "Bearer $USER_TOKEN")
-            .addHeader("X-User-ID", userId)
-            .addHeader("Content-Type", "application/json")
-            .build()
-
-        try {
-            client.newCall(request).execute().use { response ->
-                if (response.isSuccessful) {
-                    val stoppedId = activeSessionId
-                    activeSessionId = null
-                    // Stop phone awareness tracking
-                    PhoneAwarenessService.stop(this@MainActivity)
-                    Result.success("✓ Stopped session\n${stoppedId?.take(8)}...\n📱 Tracking stopped")
-                } else {
-                    // Cloud API error - fall back to direct Supabase
-                    android.util.Log.i("MainActivity", "Cloud API error ${response.code}, falling back to Supabase for stop")
-                    val directResult = stopSessionDirectly(id)
-                    return@withContext directResult.fold(
-                        onSuccess = { msg ->
-                            activeSessionId = null
-                            PhoneAwarenessService.stop(this@MainActivity)
-                            Result.success(msg)
-                        },
-                        onFailure = { Result.failure(Exception("Cloud API & Supabase stop failed: ${it.message}")) }
-                    )
+        // 2. Try cloud sync in background (only for cloud-synced sessions).
+        if (!stoppedId.startsWith("local-")) {
+            try {
+                val json = """{"planned_minutes": $activePlannedMinutes}"""
+                val body = json.toRequestBody("application/json".toMediaType())
+                val request = Request.Builder()
+                    .url("$CLOUD_API_URL/sessions/$stoppedId/end")
+                    .post(body)
+                    .addHeader("Authorization", "Bearer $USER_TOKEN")
+                    .addHeader("X-User-ID", userId)
+                    .addHeader("Content-Type", "application/json")
+                    .build()
+                val response = runCatching { client.newCall(request).execute() }.getOrNull()
+                response?.use { res ->
+                    if (res.isSuccessful) {
+                        android.util.Log.i("MainActivity", "Cloud session end synced for $stoppedId")
+                    } else {
+                        android.util.Log.w("MainActivity", "Cloud session end failed HTTP ${res.code}")
+                    }
                 }
+            } catch (e: Exception) {
+                android.util.Log.w("MainActivity", "Cloud sync failed for session stop", e)
             }
-        } catch (e: Exception) {
-            android.util.Log.e("MainActivity", "Exception stopping session (Cloud API down?)", e)
-            android.util.Log.i("MainActivity", "Falling back to direct Supabase for stop")
-            val directResult = stopSessionDirectly(id)
-            return@withContext directResult.fold(
-                onSuccess = { msg ->
-                    activeSessionId = null
-                    PhoneAwarenessService.stop(this@MainActivity)
-                    Result.success(msg)
-                },
-                onFailure = { Result.failure(Exception("Cloud API & Supabase stop failed: ${it.message}")) }
-            )
         }
+
+        Result.success("✓ Session stopped\n${stoppedId.take(8)}...")
     }
 
     override fun onDestroy() {

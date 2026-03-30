@@ -3,6 +3,7 @@ package com.brainplaner.phone.ui.home
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -25,8 +26,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import com.brainplaner.phone.LocalStore
 import kotlin.math.roundToInt
 
 @Composable
@@ -35,6 +38,19 @@ fun DailyCheckInScreen(
     onContinue: () -> Unit,
 ) {
     val state by viewModel.state.collectAsState()
+    val context = LocalContext.current
+
+    // Check local storage ONCE on entry — immune to cloud sync overrides
+    val wasCheckedInOnEntry = remember { LocalStore.hasCheckedInToday(context) }
+
+    // Auto-skip only if local storage says checked in (normal app launch)
+    LaunchedEffect(Unit) {
+        if (wasCheckedInOnEntry) onContinue()
+    }
+
+    // Don't render the form if auto-skipping
+    if (wasCheckedInOnEntry) return
+
     var sleepHours by remember { mutableFloatStateOf(7f) }
     var sleepScore by remember { mutableIntStateOf(70) }
     var rhrText by remember { mutableStateOf("") }
@@ -42,15 +58,10 @@ fun DailyCheckInScreen(
     val rhrValue: Int? = rhrText.trim().toIntOrNull()?.takeIf { it in 20..250 }
     val rhrIsError = rhrText.isNotBlank() && rhrValue == null
 
-    // If already checked in today (or after successful submit), proceed automatically.
-    LaunchedEffect(state.hasCheckedInToday) {
-        if (state.hasCheckedInToday) onContinue()
-    }
-
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(24.dp),
+            .padding(start = 24.dp, end = 24.dp, bottom = 24.dp, top = 48.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         Text("Morning check-in", style = MaterialTheme.typography.headlineSmall)
@@ -116,7 +127,10 @@ fun DailyCheckInScreen(
         )
 
         Button(
-            onClick = { viewModel.submitCheckIn(sleepHours, sleepScore, rhrValue) },
+            onClick = {
+                viewModel.submitCheckIn(sleepHours, sleepScore, rhrValue)
+                onContinue()
+            },
             enabled = !state.isCheckInSubmitting && !rhrIsError,
             modifier = Modifier.fillMaxWidth(),
         ) {

@@ -1,8 +1,12 @@
 package com.brainplaner.phone.ui.reflection
 
+import android.app.Application
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.brainplaner.phone.LocalStore
+import com.brainplaner.phone.PhoneAwarenessService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -21,66 +25,91 @@ data class ReflectionUiState(
 )
 
 class ReflectionViewModel(
+    application: Application,
     private val sessionId: String,
     private val userId: String,
     private val apiUrl: String,
     private val userToken: String,
-) : ViewModel() {
+) : AndroidViewModel(application) {
+
+    private val ctx get() = getApplication<Application>()
 
     private val client = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(15, TimeUnit.SECONDS)
+        .connectTimeout(12, TimeUnit.SECONDS)
+        .readTimeout(12, TimeUnit.SECONDS)
         .build()
 
     private val _state = MutableStateFlow(ReflectionUiState())
     val state: StateFlow<ReflectionUiState> = _state
 
+    init {
+        // Try to sync any previously pending reflection from a past session.
+        viewModelScope.launch(Dispatchers.IO) { trySyncPending() }
+    }
+
     fun submit(
-        alignmentScore: Int,        // 0 = not at all, 3 = fully aligned
-        emotionLabel: String,       // proud / neutral / mixed / frustrated / relieved
+        focusScore: Int,            // 1–5: validates in-session distraction signals
+        drainScore: Int,            // 1–5: validates recovery cost (overshoot + post-session)
         handoffNextAction: String,  // required: concrete next action
-        blockerTag: String? = null, // only when alignmentScore <= 1
         note: String? = null,
     ) {
         if (_state.value.isSubmitting) return
         viewModelScope.launch {
             _state.value = ReflectionUiState(isSubmitting = true)
 
-            // Map alignment to the legacy required execution_rating field.
+            // Save locally first — user is never blocked.
+            LocalStore.savePendingReflection(
+                ctx, sessionId, focusScore, drainScore, handoffNextAction, note
+            )
+
+            // Map focus to legacy execution_rating for backend compatibility.
             val executionRating = when {
-                alignmentScore >= 2 -> "good"
-                alignmentScore == 1 -> "ok"
+                focusScore >= 4 -> "good"
+                focusScore == 3 -> "ok"
                 else -> "poor"
             }
+            val cloudOk = withContext(Dispatchers.IO) {
+                postReflection(focusScore, drainScore, handoffNextAction, note, executionRating)
+            }
+            if (cloudOk) LocalStore.clearPendingReflection(ctx)
 
-            val result = postReflection(
-                alignmentScore = alignmentScore,
-                emotionLabel = emotionLabel,
-                handoffNextAction = handoffNextAction,
-                blockerTag = blockerTag,
-                note = note,
-                executionRating = executionRating,
-            )
+            // Start 15-min post-session cooldown tracking (phone unlocks, screen time).
+            PhoneAwarenessService.startCooldownForSession(ctx, sessionId)
 
-            _state.value = result.fold(
-                onSuccess = { ReflectionUiState(isSubmitted = true) },
-                onFailure = { ReflectionUiState(error = it.message ?: "Submit failed") },
-            )
+            _state.value = ReflectionUiState(isSubmitted = true)
         }
     }
 
+    private suspend fun trySyncPending() {
+        val pending = LocalStore.getPendingReflection(ctx) ?: return
+        val rating = when {
+            pending.focusScore >= 4 -> "good"
+            pending.focusScore == 3 -> "ok"
+            else -> "poor"
+        }
+        val ok = postReflection(
+            pending.focusScore, pending.drainScore, pending.handoffNextAction,
+            pending.note, rating,
+            overrideSessionId = pending.sessionId
+        )
+        if (ok) LocalStore.clearPendingReflection(ctx)
+    }
+
     private suspend fun postReflection(
-        alignmentScore: Int,
-        emotionLabel: String,
+        focusScore: Int,
+        drainScore: Int,
         handoffNextAction: String,
-        blockerTag: String?,
         note: String?,
         executionRating: String,
-    ): Result<Unit> = withContext(Dispatchers.IO) {
+        overrideSessionId: String? = null,
+    ): Boolean = withContext(Dispatchers.IO) {
         try {
+            val sid = overrideSessionId ?: sessionId
+            // Don't try to sync local-only sessions to cloud.
+            if (sid.startsWith("local-")) return@withContext false
+
             val noteJson = if (note.isNullOrBlank()) "null"
-                else "\"${note.trim().take(280).replace("\\", "\\\\").replace("\"", "\\\"")}\""
-            val blockerJson = if (blockerTag == null) "null" else "\"$blockerTag\""
+            else "\"${note.trim().take(280).replace("\\", "\\\\").replace("\"", "\\\"")}\""
             val nextActionEscaped = handoffNextAction.take(200)
                 .replace("\\", "\\\\").replace("\"", "\\\"")
 
@@ -89,36 +118,32 @@ class ReflectionViewModel(
                     "execution_rating": "$executionRating",
                     "next_tuning": "same",
                     "next_action": "continue_same_task",
-                    "alignment_score": $alignmentScore,
-                    "emotion_label": "$emotionLabel",
-                    "blocker_tag": $blockerJson,
+                    "focus_score": $focusScore,
+                    "drain_score": $drainScore,
                     "handoff_next_action": "$nextActionEscaped",
                     "note": $noteJson
                 }
             """.trimIndent()
 
             val request = Request.Builder()
-                .url("$apiUrl/sessions/$sessionId/reflection")
+                .url("$apiUrl/sessions/$sid/reflection")
                 .post(body.toRequestBody("application/json".toMediaType()))
                 .addHeader("Authorization", "Bearer $userToken")
                 .addHeader("X-User-ID", userId)
                 .build()
 
-            client.newCall(request).execute().use { response ->
-                if (response.isSuccessful) Result.success(Unit)
-                else Result.failure(Exception("HTTP ${response.code}: ${response.body?.string()?.take(200)}"))
-            }
-        } catch (e: Exception) {
-            Result.failure(e)
+            client.newCall(request).execute().use { it.isSuccessful }
+        } catch (_: Exception) {
+            false
         }
     }
 
     companion object {
-        fun factory(sessionId: String, userId: String, apiUrl: String, userToken: String) =
+        fun factory(application: Application, sessionId: String, userId: String, apiUrl: String, userToken: String) =
             object : ViewModelProvider.Factory {
                 @Suppress("UNCHECKED_CAST")
                 override fun <T : ViewModel> create(modelClass: Class<T>): T =
-                    ReflectionViewModel(sessionId, userId, apiUrl, userToken) as T
+                    ReflectionViewModel(application, sessionId, userId, apiUrl, userToken) as T
             }
     }
 }

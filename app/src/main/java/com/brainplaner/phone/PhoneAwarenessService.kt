@@ -29,7 +29,7 @@ class PhoneAwarenessService : Service() {
         .build()
 
     // Cloud API Configuration
-    private val CLOUD_API_URL = "http://192.168.0.23:8501"
+    private val CLOUD_API_URL = "https://brainplaner-api-beta.onrender.com"
     // For Render deployment, use: "https://brainplaner-api-beta.onrender.com"
 
     // Supabase for detailed event logging
@@ -195,24 +195,42 @@ class PhoneAwarenessService : Service() {
         }
 
         val newSessionId = intent?.getStringExtra("session_id")
+        val startCooldownSessionId = intent?.getStringExtra("start_cooldown_session_id")
         val enablePolling = intent?.getBooleanExtra("enable_polling", false) ?: false
 
         android.util.Log.i(
             "PhoneAwareness",
-            "onStartCommand(session_id=$newSessionId, enable_polling=$enablePolling, intent=${intent != null}, user=$USER_ID)"
+            "onStartCommand(session_id=$newSessionId, cooldown_session_id=$startCooldownSessionId, enable_polling=$enablePolling, intent=${intent != null}, user=$USER_ID)"
         )
 
         // ALWAYS become foreground - required on Android 8+ to prevent crash
         startForeground(NOTIFICATION_ID, buildNotification())
 
-        if (newSessionId != null) {
-            // Manual session start from phone UI
-            sessionId = newSessionId
-            unlockCount = 0
-            screenOnSeconds = 0
-            screenOnStartTime = if (lastScreenState == "on") System.currentTimeMillis() else null
+        if (startCooldownSessionId != null) {
+            // Session ended on phone UI: keep service alive and transition to cooldown phase.
+            sessionId = null
             isAutoDetected = false
-            android.util.Log.i("PhoneAwareness", "Started tracking new session: $newSessionId")
+            if (!isInCooldown || cooldownSessionId != startCooldownSessionId) {
+                startCooldown(startCooldownSessionId)
+            } else {
+                android.util.Log.i("PhoneAwareness", "Cooldown already active for session: $startCooldownSessionId")
+            }
+        } else if (newSessionId != null) {
+            // Manual session start from phone UI.
+            // Preserve counters when upgrading local session id -> cloud session id.
+            val previousSessionId = sessionId
+            val isUpgradeFromLocal = previousSessionId?.startsWith("local-") == true && !newSessionId.startsWith("local-")
+            sessionId = newSessionId
+            isAutoDetected = false
+
+            if (isUpgradeFromLocal) {
+                android.util.Log.i("PhoneAwareness", "Upgraded local session to cloud id: $previousSessionId -> $newSessionId")
+            } else {
+                unlockCount = 0
+                screenOnSeconds = 0
+                screenOnStartTime = if (lastScreenState == "on") System.currentTimeMillis() else null
+                android.util.Log.i("PhoneAwareness", "Started tracking new session: $newSessionId")
+            }
         } else {
             // Polling mode (explicit or START_STICKY restart with null intent)
             isAutoDetected = true
@@ -499,6 +517,11 @@ class PhoneAwarenessService : Service() {
         timeToFirstPickupSeconds = null
         unlockCount = 0
         updateNotification()
+
+        // If there is no active session after cooldown, stop the service to save battery.
+        if (sessionId == null) {
+            stopSelf()
+        }
     }
 
     private fun submitCooldownMetrics(
@@ -970,6 +993,17 @@ class PhoneAwarenessService : Service() {
                 putExtra("enable_polling", true)
             }
             // Must use startForegroundService on Android 8+ since onStartCommand calls startForeground
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
+            }
+        }
+
+        fun startCooldownForSession(context: Context, sessionId: String) {
+            val intent = Intent(context, PhoneAwarenessService::class.java).apply {
+                putExtra("start_cooldown_session_id", sessionId)
+            }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
             } else {

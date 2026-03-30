@@ -1,17 +1,28 @@
 package com.brainplaner.phone.ui.home
 
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -27,19 +38,36 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.brainplaner.phone.LocalStore
+import com.brainplaner.phone.ui.theme.BrainTeal
+import com.brainplaner.phone.ui.theme.BudgetGreen
+import com.brainplaner.phone.ui.theme.BudgetRed
+import com.brainplaner.phone.ui.theme.BudgetYellow
+import androidx.compose.foundation.layout.Row
+import androidx.compose.material3.Switch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-private val DURATION_OPTIONS = listOf(15, 30, 45, 60)
+private val DURATION_OPTIONS = listOf(15, 30, 45, 60, 120)
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun HomeScreen(
     viewModel: HomeViewModel,
     onStartSession: suspend (plannedMinutes: Int) -> Result<String>,
     onStopSession: suspend () -> Result<String>,
+    onResetCheckIn: () -> Unit,
     onLogout: () -> Unit,
-) {
+){
     val state by viewModel.state.collectAsState()
     val scope = rememberCoroutineScope()
     var plannedMinutes by remember { mutableIntStateOf(45) }
@@ -49,6 +77,26 @@ fun HomeScreen(
     var elapsedSeconds by remember { mutableLongStateOf(0L) }
     var actionMessage by remember { mutableStateOf<String?>(null) }
     var isActionLoading by remember { mutableStateOf(false) }
+
+    val context = LocalContext.current
+    var warmupEnabled by remember { mutableStateOf(LocalStore.isWarmupEnabled(context)) }
+
+    val startSessionAction: () -> Unit = {
+        scope.launch {
+            isActionLoading = true
+            val result = onStartSession(plannedMinutes)
+            actionMessage = result.fold(
+                onSuccess = {
+                    activePlannedMinutes = plannedMinutes
+                    sessionStartMs = System.currentTimeMillis()
+                    isSessionActive = true
+                    it
+                },
+                onFailure = { e -> "Error: ${e.message ?: "Failed to start"}" },
+            )
+            isActionLoading = false
+        }
+    }
 
     LaunchedEffect(isSessionActive, sessionStartMs) {
         if (!isSessionActive || sessionStartMs <= 0L) {
@@ -64,53 +112,126 @@ fun HomeScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(24.dp),
-        verticalArrangement = Arrangement.spacedBy(20.dp),
+            .verticalScroll(rememberScrollState())
+            .padding(20.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Text("Brain Budget", style = MaterialTheme.typography.labelMedium)
-        if (state.isLoading) {
-            CircularProgressIndicator(modifier = Modifier.size(28.dp), strokeWidth = 3.dp)
-        } else {
+        // ── App header ──
+        Text(
+            "Brainplaner",
+            style = MaterialTheme.typography.headlineMedium,
+            color = MaterialTheme.colorScheme.primary,
+        )
+
+        if (state.isOffline) {
             Text(
-                state.readinessScore?.let { "$it / 100" } ?: "—",
-                style = MaterialTheme.typography.displaySmall,
+                "📴 Offline mode",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            state.planningAccuracyLine?.let {
+        }
+
+        Spacer(modifier = Modifier.height(20.dp))
+
+        // ── Brain Budget gauge card ──
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(20.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant,
+            ),
+        ) {
+            Column(
+                modifier = Modifier.padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
                 Text(
-                    it,
-                    style = MaterialTheme.typography.bodySmall,
+                    "BRAIN BUDGET",
+                    style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    letterSpacing = 2.sp,
                 )
+                Spacer(modifier = Modifier.height(16.dp))
+
+                if (state.isLoading) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(40.dp),
+                        strokeWidth = 3.dp,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                } else {
+                    val score = state.readinessScore?.toIntOrNull() ?: 0
+                    BrainBudgetGauge(score = score, modifier = Modifier.size(160.dp))
+                    Spacer(modifier = Modifier.height(8.dp))
+                    state.planningAccuracyLine?.let {
+                        Text(
+                            it,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
             }
         }
 
-        HorizontalDivider()
+        Spacer(modifier = Modifier.height(16.dp))
 
-        if (state.isLoading) {
-            CircularProgressIndicator(modifier = Modifier.size(20.dp))
-        } else {
-            state.sessionSummary?.let { Text(it, style = MaterialTheme.typography.bodyMedium) }
-            state.handoffNextAction?.let {
+        // ── Continuity / handoff card ──
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant,
+            ),
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
                 Text(
-                    "Next step: $it",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.primary,
-                )
-            }
-            if (state.sessionSummary == null && state.handoffNextAction == null) {
-                Text(
-                    "No previous session",
-                    style = MaterialTheme.typography.bodyMedium,
+                    "CONTINUITY",
+                    style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    letterSpacing = 2.sp,
                 )
+                Spacer(modifier = Modifier.height(8.dp))
+
+                if (state.isLoading) {
+                    CircularProgressIndicator(modifier = Modifier.size(20.dp))
+                } else {
+                    state.sessionSummary?.let {
+                        Text(it, style = MaterialTheme.typography.bodyMedium)
+                    }
+                    state.handoffNextAction?.let {
+                        Text(
+                            "▸ Next: $it",
+                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                    if (state.sessionSummary == null && state.handoffNextAction == null) {
+                        Text(
+                            "No previous session — start your first one!",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
             }
         }
 
-        HorizontalDivider()
+        Spacer(modifier = Modifier.height(20.dp))
 
+        // ── Session controls ──
         if (!isSessionActive) {
-            Text("Planned duration", style = MaterialTheme.typography.labelMedium)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                "PLANNED DURATION",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                letterSpacing = 2.sp,
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
                 DURATION_OPTIONS.forEach { min ->
                     FilterChip(
                         selected = plannedMinutes == min,
@@ -120,55 +241,112 @@ fun HomeScreen(
                 }
             }
 
-            Spacer(modifier = Modifier.weight(1f))
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Cognitive warm-up toggle
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column {
+                    Text("Cognitive Warm-up", style = MaterialTheme.typography.labelLarge)
+                    Text(
+                        "5-tap reaction time baseline",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = warmupEnabled,
+                    onCheckedChange = {
+                        warmupEnabled = it
+                        LocalStore.setWarmupEnabled(context, it)
+                    },
+                )
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
 
             Button(
                 onClick = {
                     if (isActionLoading) return@Button
-                    scope.launch {
-                        isActionLoading = true
-                        val result = onStartSession(plannedMinutes)
-                        actionMessage = result.fold(
-                            onSuccess = {
-                                activePlannedMinutes = plannedMinutes
-                                sessionStartMs = System.currentTimeMillis()
-                                isSessionActive = true
-                                it
-                            },
-                            onFailure = { e -> "Error: ${e.message ?: "Failed to start"}" },
-                        )
-                        isActionLoading = false
-                    }
+                    startSessionAction()
                 },
                 enabled = !isActionLoading,
                 modifier = Modifier
-                    .fillMaxWidth(0.82f)
-                    .align(Alignment.CenterHorizontally),
+                    .fillMaxWidth()
+                    .height(56.dp),
+                shape = RoundedCornerShape(16.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.primary,
+                ),
             ) {
                 if (isActionLoading) {
-                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(22.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.onPrimary,
+                    )
                 } else {
-                    Text("Start Session")
+                    Text("Start Session", style = MaterialTheme.typography.titleLarge)
                 }
             }
         } else {
+            // ── Active session with timer ring ──
             val plannedSeconds = activePlannedMinutes * 60L
             val remaining = plannedSeconds - elapsedSeconds
+            val progress = (elapsedSeconds.toFloat() / plannedSeconds.toFloat()).coerceIn(0f, 2f)
+            val isOvertime = remaining < 0
 
-            Text("Session active", style = MaterialTheme.typography.labelMedium)
-            Text(formatDuration(elapsedSeconds), style = MaterialTheme.typography.displaySmall)
-            Text(
-                "Planned: ${activePlannedMinutes}m",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Text(
-                if (remaining >= 0) "Remaining: ${formatDuration(remaining)}" else "Overtime: +${formatDuration(-remaining)}",
-                style = MaterialTheme.typography.bodyMedium,
-                color = if (remaining >= 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
-            )
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                ),
+            ) {
+                Column(
+                    modifier = Modifier.padding(24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Text(
+                        if (isOvertime) "OVERTIME" else "SESSION ACTIVE",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (isOvertime) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                        letterSpacing = 2.sp,
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
 
-            Spacer(modifier = Modifier.weight(1f))
+                    SessionTimerRing(
+                        progress = progress,
+                        isOvertime = isOvertime,
+                        modifier = Modifier.size(180.dp),
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(
+                                formatDuration(elapsedSeconds),
+                                style = MaterialTheme.typography.displayMedium,
+                            )
+                            Text(
+                                if (remaining >= 0) "-${formatDuration(remaining)}"
+                                else "+${formatDuration(-remaining)}",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = if (isOvertime) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        "Planned: ${activePlannedMinutes}m",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(20.dp))
 
             Button(
                 onClick = {
@@ -190,32 +368,151 @@ fun HomeScreen(
                 },
                 enabled = !isActionLoading,
                 modifier = Modifier
-                    .fillMaxWidth(0.82f)
-                    .align(Alignment.CenterHorizontally),
+                    .fillMaxWidth()
+                    .height(56.dp),
+                shape = RoundedCornerShape(16.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.error,
+                ),
             ) {
                 if (isActionLoading) {
-                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(22.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.onPrimary,
+                    )
                 } else {
-                    Text("Stop Session")
+                    Text("Stop Session", style = MaterialTheme.typography.titleLarge)
                 }
             }
         }
 
+        // ── Status / action messages ──
         actionMessage?.let {
+            Spacer(modifier = Modifier.height(8.dp))
             Text(
                 text = it,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.align(Alignment.CenterHorizontally),
+                textAlign = TextAlign.Center,
             )
         }
 
+        Spacer(modifier = Modifier.height(16.dp))
         TextButton(
-            onClick = onLogout,
-            modifier = Modifier.align(Alignment.CenterHorizontally),
+            onClick = {
+                LocalStore.clearCheckIn(context)
+                onResetCheckIn()
+            },
         ) {
-            Text("Switch User / Logout", color = MaterialTheme.colorScheme.error)
+            Text("↩ Reset daily check-in (demo)", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.labelSmall)
         }
+        TextButton(onClick = onLogout) {
+            Text("Logout", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+// ── Circular Brain Budget Gauge ──
+
+@Composable
+private fun BrainBudgetGauge(score: Int, modifier: Modifier = Modifier) {
+    val fraction = (score / 100f).coerceIn(0f, 1f)
+    val animatedFraction by animateFloatAsState(
+        targetValue = fraction,
+        animationSpec = tween(durationMillis = 800),
+        label = "gauge",
+    )
+    val gaugeColor = when {
+        score >= 70 -> BudgetGreen
+        score >= 40 -> BudgetYellow
+        else -> BudgetRed
+    }
+    val trackColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f)
+
+    Box(modifier = modifier, contentAlignment = Alignment.Center) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val strokeWidth = 14.dp.toPx()
+            val arcSize = Size(size.width - strokeWidth, size.height - strokeWidth)
+            val topLeft = Offset(strokeWidth / 2, strokeWidth / 2)
+
+            // Track
+            drawArc(
+                color = trackColor,
+                startAngle = 135f,
+                sweepAngle = 270f,
+                useCenter = false,
+                topLeft = topLeft,
+                size = arcSize,
+                style = Stroke(width = strokeWidth, cap = StrokeCap.Round),
+            )
+            // Fill
+            drawArc(
+                color = gaugeColor,
+                startAngle = 135f,
+                sweepAngle = 270f * animatedFraction,
+                useCenter = false,
+                topLeft = topLeft,
+                size = arcSize,
+                style = Stroke(width = strokeWidth, cap = StrokeCap.Round),
+            )
+        }
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(
+                "$score",
+                style = MaterialTheme.typography.displayLarge.copy(
+                    color = gaugeColor,
+                    fontWeight = FontWeight.Bold,
+                ),
+            )
+            Text(
+                "/ 100",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+// ── Session Timer Ring ──
+
+@Composable
+private fun SessionTimerRing(
+    progress: Float,
+    isOvertime: Boolean,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit,
+) {
+    val clampedProgress = progress.coerceIn(0f, 1f)
+    val ringColor = if (isOvertime) BudgetRed else BrainTeal
+    val trackColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.15f)
+
+    Box(modifier = modifier, contentAlignment = Alignment.Center) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val strokeWidth = 10.dp.toPx()
+            val arcSize = Size(size.width - strokeWidth, size.height - strokeWidth)
+            val topLeft = Offset(strokeWidth / 2, strokeWidth / 2)
+
+            drawArc(
+                color = trackColor,
+                startAngle = -90f,
+                sweepAngle = 360f,
+                useCenter = false,
+                topLeft = topLeft,
+                size = arcSize,
+                style = Stroke(width = strokeWidth, cap = StrokeCap.Round),
+            )
+            drawArc(
+                color = ringColor,
+                startAngle = -90f,
+                sweepAngle = 360f * clampedProgress,
+                useCenter = false,
+                topLeft = topLeft,
+                size = arcSize,
+                style = Stroke(width = strokeWidth, cap = StrokeCap.Round),
+            )
+        }
+        content()
     }
 }
 
@@ -230,4 +527,3 @@ private fun formatDuration(totalSeconds: Long): String {
         String.format("%02d:%02d", minutes, seconds)
     }
 }
-

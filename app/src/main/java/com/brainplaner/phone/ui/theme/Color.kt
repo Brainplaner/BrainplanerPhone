@@ -2,10 +2,22 @@ package com.brainplaner.phone.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
-val Purple80 = Color(0xFFD0BCFF)
-val PurpleGrey80 = Color(0xFFCCC2DC)
-val Pink80 = Color(0xFFEFB8C8)
+// Brainplaner brand palette — cognitive focus theme
+val BrainTeal = Color(0xFF00BFA5)        // Primary: focus, energy
+val BrainTealLight = Color(0xFF64FFDA)   // Primary container
+val BrainTealDark = Color(0xFF00897B)    // Dark variant
+val BrainDeep = Color(0xFF1A237E)        // Deep blue: depth, cognition
+val BrainDeepLight = Color(0xFF534BAE)
+val BrainWarm = Color(0xFFFF6D00)        // Accent: urgency, overtime
+val BrainWarmLight = Color(0xFFFFAB40)
 
-val Purple40 = Color(0xFF6650a4)
-val PurpleGrey40 = Color(0xFF625b71)
-val Pink40 = Color(0xFF7D5260)
+// Surface & background
+val DarkSurface = Color(0xFF121212)
+val DarkSurfaceCard = Color(0xFF1E1E2E)
+val LightSurface = Color(0xFFF8F9FC)
+val LightSurfaceCard = Color(0xFFFFFFFF)
+
+// Semantic
+val BudgetGreen = Color(0xFF00C853)
+val BudgetYellow = Color(0xFFFFD600)
+val BudgetRed = Color(0xFFFF1744)

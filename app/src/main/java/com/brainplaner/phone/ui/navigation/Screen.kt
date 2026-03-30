@@ -1,6 +1,8 @@
 package com.brainplaner.phone.ui.navigation
 
 sealed class Screen(val route: String) {
+    object DailyCheckIn : Screen("daily_check_in")
+    object CognitiveWarmup : Screen("cognitive_warmup")
     object Home : Screen("home")
     object Session : Screen("session")
     object Reflection : Screen("reflection/{sessionId}") {
