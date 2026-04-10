@@ -31,9 +31,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.brainplaner.phone.LocalStore
 import com.brainplaner.phone.ui.theme.BudgetGreen
 import com.brainplaner.phone.ui.theme.BudgetYellow
 
@@ -62,18 +64,20 @@ fun ReflectionScreen(
     data class AnchoredScore(val score: Int, val label: String, val anchor: String)
 
     val focusAnchors = listOf(
-        AnchoredScore(1, "Couldn't focus", "Kept picking up phone, couldn't settle"),
-        AnchoredScore(2, "Scattered", "Started working but frequently drifted"),
-        AnchoredScore(3, "Moderate", "Some distractions but got work done"),
-        AnchoredScore(4, "Focused", "Mostly uninterrupted, few breaks"),
         AnchoredScore(5, "Flow state", "Lost track of time, deep in the work"),
+        AnchoredScore(4, "Focused", "Mostly uninterrupted, few breaks"),
+        AnchoredScore(3, "Moderate", "Some distractions but got work done"),
+        AnchoredScore(2, "Scattered", "Started working but frequently drifted"),
+        AnchoredScore(1, "Couldn't focus", "Kept picking up phone, couldn't settle"),
     )
     val drainAnchors = listOf(
-        AnchoredScore(1, "Energized", "Could do another session right now"),
-        AnchoredScore(2, "Mild fatigue", "Fine but wouldn't want a hard task next"),
+        AnchoredScore(5, "Energized", "Could do another session right now"),
+        AnchoredScore(4, "Mild fatigue", "Fine but wouldn't want a hard task next"),
         AnchoredScore(3, "Tired", "Need a real break before more work"),
-        AnchoredScore(4, "Drained", "Brain feels slow, making mistakes"),
-        AnchoredScore(5, "Depleted", "Done for the day, can't concentrate"),
+        AnchoredScore(2, "Drained", "Brain feels slow, making mistakes"),
+        AnchoredScore(1, "Depleted", "Done for the day, can't concentrate"),
+        
+        
     )
 
     val canSubmit = focusScore > 0 && drainScore > 0 && handoffNextAction.isNotBlank()
@@ -262,6 +266,7 @@ private data class RecoveryAction(
     val title: String,
     val description: String,
     val budgetBoost: String,
+    val boostPoints: Int,
     val duration: String,
 )
 
@@ -270,7 +275,9 @@ private fun RecoverySuggestionsScreen(
     drainScore: Int,
     onDone: () -> Unit,
 ) {
+    val context = LocalContext.current
     val actions = buildRecoveryActions(drainScore)
+    var selectedIndex by remember { mutableIntStateOf(-1) }
 
     Column(
         modifier = Modifier
@@ -286,20 +293,28 @@ private fun RecoverySuggestionsScreen(
         )
         Spacer(modifier = Modifier.height(4.dp))
         Text(
-            "Suggested actions to recharge your brain budget",
+            "Pick one — confirm when you're back",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
 
         Spacer(modifier = Modifier.height(20.dp))
 
-        actions.forEach { action ->
+        actions.forEachIndexed { index, action ->
+            val isSelected = selectedIndex == index
             Card(
+                onClick = { selectedIndex = if (isSelected) -1 else index },
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(16.dp),
                 colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                    containerColor = if (isSelected)
+                        BudgetGreen.copy(alpha = 0.15f)
+                    else
+                        MaterialTheme.colorScheme.surfaceVariant,
                 ),
+                border = if (isSelected)
+                    androidx.compose.foundation.BorderStroke(2.dp, BudgetGreen)
+                else null,
             ) {
                 Row(
                     modifier = Modifier.padding(16.dp),
@@ -307,7 +322,7 @@ private fun RecoverySuggestionsScreen(
                     verticalAlignment = Alignment.Top,
                 ) {
                     Text(
-                        action.emoji,
+                        if (isSelected) "✅" else action.emoji,
                         style = MaterialTheme.typography.displaySmall,
                     )
                     Column(modifier = Modifier.weight(1f)) {
@@ -376,16 +391,31 @@ private fun RecoverySuggestionsScreen(
         Spacer(modifier = Modifier.height(24.dp))
 
         Button(
-            onClick = onDone,
+            onClick = {
+                if (selectedIndex >= 0) {
+                    val picked = actions[selectedIndex]
+                    LocalStore.savePendingRecovery(
+                        context,
+                        type = picked.title,
+                        emoji = picked.emoji,
+                        boostPoints = picked.boostPoints,
+                    )
+                }
+                onDone()
+            },
             modifier = Modifier
                 .fillMaxWidth()
                 .height(56.dp),
             shape = RoundedCornerShape(16.dp),
             colors = ButtonDefaults.buttonColors(
-                containerColor = MaterialTheme.colorScheme.primary,
+                containerColor = if (selectedIndex >= 0) BudgetGreen else MaterialTheme.colorScheme.primary,
             ),
         ) {
-            Text("Done — Back to Home", style = MaterialTheme.typography.titleLarge)
+            Text(
+                if (selectedIndex >= 0) "Start ${actions[selectedIndex].title} — Back to Home"
+                else "Skip — Back to Home",
+                style = MaterialTheme.typography.titleLarge,
+            )
         }
 
         Spacer(modifier = Modifier.height(32.dp))
@@ -394,24 +424,24 @@ private fun RecoverySuggestionsScreen(
 
 private fun buildRecoveryActions(drainScore: Int): List<RecoveryAction> {
     val walkBoost = when {
-        drainScore >= 4 -> "+12"
-        drainScore == 3 -> "+8"
-        else -> "+5"
+        drainScore >= 4 -> 12
+        drainScore == 3 -> 8
+        else -> 5
     }
     val eatBoost = when {
-        drainScore >= 4 -> "+10"
-        drainScore == 3 -> "+7"
-        else -> "+4"
+        drainScore >= 4 -> 10
+        drainScore == 3 -> 7
+        else -> 4
     }
     val trainBoost = when {
-        drainScore >= 4 -> "+18"
-        drainScore == 3 -> "+14"
-        else -> "+10"
+        drainScore >= 4 -> 18
+        drainScore == 3 -> 14
+        else -> 10
     }
     val napBoost = when {
-        drainScore >= 4 -> "+22"
-        drainScore == 3 -> "+15"
-        else -> "+8"
+        drainScore >= 4 -> 22
+        drainScore == 3 -> 15
+        else -> 8
     }
 
     return listOf(
@@ -419,28 +449,32 @@ private fun buildRecoveryActions(drainScore: Int): List<RecoveryAction> {
             emoji = "🚶",
             title = "Walk",
             description = "Fresh air + light movement. Clears mental fog without taxing your body.",
-            budgetBoost = "$walkBoost budget",
+            budgetBoost = "+$walkBoost budget",
+            boostPoints = walkBoost,
             duration = "15–20 min",
         ),
         RecoveryAction(
             emoji = "🍽️",
             title = "Eat",
             description = "Balanced meal or snack. Glucose restores decision-making capacity.",
-            budgetBoost = "$eatBoost budget",
+            budgetBoost = "+$eatBoost budget",
+            boostPoints = eatBoost,
             duration = "20–30 min",
         ),
         RecoveryAction(
             emoji = "🏋️",
             title = "Train",
             description = "Moderate exercise. BDNF release boosts neuroplasticity and clears cortisol.",
-            budgetBoost = "$trainBoost budget",
+            budgetBoost = "+$trainBoost budget",
+            boostPoints = trainBoost,
             duration = "30–45 min",
         ),
         RecoveryAction(
             emoji = "😴",
             title = "Power Nap",
             description = "Short sleep resets working memory. Best ROI for high drain scores.",
-            budgetBoost = "$napBoost budget",
+            budgetBoost = "+$napBoost budget",
+            boostPoints = napBoost,
             duration = "20–30 min",
         ),
     )

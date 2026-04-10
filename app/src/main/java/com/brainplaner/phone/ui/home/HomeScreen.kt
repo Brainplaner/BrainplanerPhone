@@ -53,9 +53,9 @@ import com.brainplaner.phone.ui.theme.BudgetGreen
 import com.brainplaner.phone.ui.theme.BudgetRed
 import com.brainplaner.phone.ui.theme.BudgetYellow
 import androidx.compose.foundation.layout.Row
-import androidx.compose.material3.Switch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlin.math.max
 
 private val DURATION_OPTIONS = listOf(15, 30, 45, 60, 120)
 
@@ -65,8 +65,7 @@ fun HomeScreen(
     viewModel: HomeViewModel,
     onStartSession: suspend (plannedMinutes: Int) -> Result<String>,
     onStopSession: suspend () -> Result<String>,
-    onResetCheckIn: () -> Unit,
-    onLogout: () -> Unit,
+    onBudgetDetail: () -> Unit,
 ){
     val state by viewModel.state.collectAsState()
     val scope = rememberCoroutineScope()
@@ -77,9 +76,16 @@ fun HomeScreen(
     var elapsedSeconds by remember { mutableLongStateOf(0L) }
     var actionMessage by remember { mutableStateOf<String?>(null) }
     var isActionLoading by remember { mutableStateOf(false) }
+    var previousOffline by remember { mutableStateOf(false) }
 
     val context = LocalContext.current
-    var warmupEnabled by remember { mutableStateOf(LocalStore.isWarmupEnabled(context)) }
+
+    LaunchedEffect(Unit) {
+        val activeSession = LocalStore.getActiveSession(context) ?: return@LaunchedEffect
+        activePlannedMinutes = activeSession.plannedMinutes
+        sessionStartMs = activeSession.startMs
+        isSessionActive = true
+    }
 
     val startSessionAction: () -> Unit = {
         scope.launch {
@@ -109,6 +115,22 @@ fun HomeScreen(
         }
     }
 
+    // Retry cloud enrichment periodically while on Home to handle Render cold starts.
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(45_000L)
+            viewModel.refreshCloudData()
+        }
+    }
+
+    // Emit a simple reconnection message when cloud becomes reachable again.
+    LaunchedEffect(state.isOffline) {
+        if (previousOffline && !state.isOffline) {
+            actionMessage = "✅ Reconnected — cloud sync updated"
+        }
+        previousOffline = state.isOffline
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -124,17 +146,45 @@ fun HomeScreen(
         )
 
         if (state.isOffline) {
-            Text(
-                "📴 Offline mode",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column {
+                    Text(
+                        "📴 Offline mode",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    state.cloudErrorReason?.let { reason ->
+                        Text(
+                            reason,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+                TextButton(onClick = { viewModel.refreshCloudData() }) {
+                    Text("Retry now")
+                }
+            }
+        } else {
+            state.lastCloudSyncAtMs?.let { ts ->
+                val minsAgo = max(0L, (System.currentTimeMillis() - ts) / 60_000L)
+                Text(
+                    "☁️ Synced ${minsAgo}m ago",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
 
         Spacer(modifier = Modifier.height(20.dp))
 
         // ── Brain Budget gauge card ──
         Card(
+            onClick = onBudgetDetail,
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(20.dp),
             colors = CardDefaults.cardColors(
@@ -163,18 +213,89 @@ fun HomeScreen(
                     val score = state.readinessScore?.toIntOrNull() ?: 0
                     BrainBudgetGauge(score = score, modifier = Modifier.size(160.dp))
                     Spacer(modifier = Modifier.height(8.dp))
-                    state.planningAccuracyLine?.let {
-                        Text(
-                            it,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
+                    Text(
+                        "Tap for details",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
                 }
             }
         }
 
         Spacer(modifier = Modifier.height(16.dp))
+
+        // ── Pending recovery banner ──
+        var pendingRecovery by remember {
+            mutableStateOf(LocalStore.getPendingRecovery(context))
+        }
+        pendingRecovery?.let { recovery ->
+            val minutesAgo = ((System.currentTimeMillis() - recovery.selectedAt) / 60_000).toInt()
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = BudgetGreen.copy(alpha = 0.12f),
+                ),
+                border = androidx.compose.foundation.BorderStroke(
+                    1.dp,
+                    BudgetGreen.copy(alpha = 0.4f),
+                ),
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            "${recovery.emoji} ${recovery.type} in progress",
+                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                        )
+                        Text(
+                            if (minutesAgo < 1) "just now" else "${minutesAgo}m ago",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        "+${recovery.boostPoints} budget when confirmed",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = BudgetGreen,
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Button(
+                            onClick = {
+                                viewModel.applyRecoveryBoost(recovery.boostPoints)
+                                LocalStore.clearPendingRecovery(context)
+                                pendingRecovery = null
+                            },
+                            modifier = Modifier.weight(1f).height(44.dp),
+                            shape = RoundedCornerShape(12.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = BudgetGreen,
+                            ),
+                        ) {
+                            Text("✅ Done!", style = MaterialTheme.typography.labelLarge)
+                        }
+                        TextButton(
+                            onClick = {
+                                LocalStore.clearPendingRecovery(context)
+                                pendingRecovery = null
+                            },
+                        ) {
+                            Text("Dismiss", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+        }
 
         // ── Continuity / handoff card ──
         Card(
@@ -239,31 +360,6 @@ fun HomeScreen(
                         label = { Text("${min}m") },
                     )
                 }
-            }
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            // Cognitive warm-up toggle
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column {
-                    Text("Cognitive Warm-up", style = MaterialTheme.typography.labelLarge)
-                    Text(
-                        "5-tap reaction time baseline",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Switch(
-                    checked = warmupEnabled,
-                    onCheckedChange = {
-                        warmupEnabled = it
-                        LocalStore.setWarmupEnabled(context, it)
-                    },
-                )
             }
 
             Spacer(modifier = Modifier.height(16.dp))
@@ -399,17 +495,6 @@ fun HomeScreen(
         }
 
         Spacer(modifier = Modifier.height(16.dp))
-        TextButton(
-            onClick = {
-                LocalStore.clearCheckIn(context)
-                onResetCheckIn()
-            },
-        ) {
-            Text("↩ Reset daily check-in (demo)", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.labelSmall)
-        }
-        TextButton(onClick = onLogout) {
-            Text("Logout", color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
     }
 }
 

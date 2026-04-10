@@ -206,7 +206,23 @@ object LocalStore {
     fun saveWarmupResult(ctx: Context, medianMs: Int) {
         prefs(ctx).edit()
             .putInt("warmup_${todayKey()}", medianMs)
+            .putBoolean("warmup_synced_${todayKey()}", false)
             .apply()
+    }
+
+    fun getTodayWarmupData(ctx: Context): Pair<String, Int>? {
+        val key = todayKey()
+        val p = prefs(ctx)
+        val metricKey = "warmup_$key"
+        if (!p.contains(metricKey)) return null
+        return key to p.getInt(metricKey, 0)
+    }
+
+    fun isWarmupSyncedToday(ctx: Context): Boolean =
+        prefs(ctx).getBoolean("warmup_synced_${todayKey()}", false)
+
+    fun markWarmupSyncedToday(ctx: Context) {
+        prefs(ctx).edit().putBoolean("warmup_synced_${todayKey()}", true).apply()
     }
 
     /** Median of last 14 days' warm-up results (excluding today). */
@@ -227,6 +243,46 @@ object LocalStore {
         results.sort()
         val n = results.size
         return if (n % 2 == 0) (results[n / 2 - 1] + results[n / 2]) / 2 else results[n / 2]
+    }
+
+    // ── Pending recovery ────────────────────────────────────────
+
+    data class PendingRecoveryData(
+        val type: String,
+        val emoji: String,
+        val boostPoints: Int,
+        val selectedAt: Long,
+    )
+
+    fun savePendingRecovery(ctx: Context, type: String, emoji: String, boostPoints: Int) {
+        prefs(ctx).edit()
+            .putString("recovery_type", type)
+            .putString("recovery_emoji", emoji)
+            .putInt("recovery_boost", boostPoints)
+            .putLong("recovery_selected_at", System.currentTimeMillis())
+            .putBoolean("recovery_pending", true)
+            .apply()
+    }
+
+    fun getPendingRecovery(ctx: Context): PendingRecoveryData? {
+        val p = prefs(ctx)
+        if (!p.getBoolean("recovery_pending", false)) return null
+        return PendingRecoveryData(
+            type = p.getString("recovery_type", "") ?: "",
+            emoji = p.getString("recovery_emoji", "") ?: "",
+            boostPoints = p.getInt("recovery_boost", 0),
+            selectedAt = p.getLong("recovery_selected_at", 0L),
+        )
+    }
+
+    fun clearPendingRecovery(ctx: Context) {
+        prefs(ctx).edit()
+            .remove("recovery_type")
+            .remove("recovery_emoji")
+            .remove("recovery_boost")
+            .remove("recovery_selected_at")
+            .putBoolean("recovery_pending", false)
+            .apply()
     }
 
     data class ActiveSession(

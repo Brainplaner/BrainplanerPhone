@@ -24,11 +24,14 @@ data class HomeUiState(
     val sessionSummary: String? = null,
     val handoffNextAction: String? = null,
     val readinessScore: String? = null,
+    val readinessBreakdown: Map<String, Float> = emptyMap(),
     val planningAccuracyLine: String? = null,
     val hasCheckedInToday: Boolean = false,
     val isCheckInSubmitting: Boolean = false,
     val checkInError: String? = null,
     val isOffline: Boolean = false,
+    val lastCloudSyncAtMs: Long? = null,
+    val cloudErrorReason: String? = null,
 )
 
 class HomeViewModel(
@@ -41,9 +44,9 @@ class HomeViewModel(
     private val ctx get() = getApplication<Application>()
 
     private val client = OkHttpClient.Builder()
-        .connectTimeout(12, TimeUnit.SECONDS)
-        .readTimeout(12, TimeUnit.SECONDS)
-        .callTimeout(15, TimeUnit.SECONDS)
+        .connectTimeout(20, TimeUnit.SECONDS)
+        .readTimeout(35, TimeUnit.SECONDS)
+        .callTimeout(40, TimeUnit.SECONDS)
         .build()
 
     private val _state = MutableStateFlow(HomeUiState())
@@ -71,10 +74,21 @@ class HomeViewModel(
                 handoffNextAction = localNextAction,
                 sessionSummary = localSummary,
                 isOffline = false,
+                lastCloudSyncAtMs = null,
+                cloudErrorReason = null,
             )
 
             // Try to enrich with cloud data in background (non-blocking).
             launch { trySyncPendingCheckIn() }
+            launch { trySyncPendingWarmup() }
+            launch { tryEnrichFromCloud() }
+        }
+    }
+
+    fun refreshCloudData() {
+        viewModelScope.launch {
+            launch { trySyncPendingCheckIn() }
+            launch { trySyncPendingWarmup() }
             launch { tryEnrichFromCloud() }
         }
     }
@@ -88,21 +102,40 @@ class HomeViewModel(
         if (synced) LocalStore.markCheckInSynced(ctx)
     }
 
+    /** Try to sync today's warmup result to cloud (fire-and-forget). */
+    private suspend fun trySyncPendingWarmup() = withContext(Dispatchers.IO) {
+        if (LocalStore.isWarmupSyncedToday(ctx)) return@withContext
+        val warmup = LocalStore.getTodayWarmupData(ctx) ?: return@withContext
+        val (date, medianMs) = warmup
+        val synced = postWarmupToCloud(date, medianMs)
+        if (synced) LocalStore.markWarmupSyncedToday(ctx)
+    }
+
     /** Try to fetch cloud readiness/brief and update state. */
     private suspend fun tryEnrichFromCloud() {
         val brief = withContext(Dispatchers.IO) { fetchBrief() }
         val readinessData = withContext(Dispatchers.IO) { fetchReadinessData() }
 
-        val (cloudScore, cloudCheckedIn, planningLine) = readinessData
         val current = _state.value
+        val anyCloudSuccess = brief.success || readinessData.success
+        val nowOffline = !anyCloudSuccess && current.readinessScore != null
+        val nextLastSync = if (anyCloudSuccess) System.currentTimeMillis() else current.lastCloudSyncAtMs
+        val nextErrorReason = if (anyCloudSuccess) {
+            null
+        } else {
+            readinessData.errorReason ?: brief.errorReason ?: "Cloud fetch failed"
+        }
 
         _state.value = current.copy(
-            readinessScore = cloudScore ?: current.readinessScore,
-            hasCheckedInToday = cloudCheckedIn || current.hasCheckedInToday,
-            planningAccuracyLine = planningLine ?: current.planningAccuracyLine,
+            readinessScore = readinessData.score ?: current.readinessScore,
+            readinessBreakdown = if (readinessData.breakdown.isNotEmpty()) readinessData.breakdown else current.readinessBreakdown,
+            hasCheckedInToday = readinessData.hasCheckinToday || current.hasCheckedInToday,
+            planningAccuracyLine = readinessData.planningLine ?: current.planningAccuracyLine,
             sessionSummary = brief.sessionSummary ?: current.sessionSummary,
             handoffNextAction = brief.handoffNextAction ?: current.handoffNextAction,
-            isOffline = cloudScore == null && current.readinessScore != null,
+            isOffline = nowOffline,
+            lastCloudSyncAtMs = nextLastSync,
+            cloudErrorReason = nextErrorReason,
         )
     }
 
@@ -150,7 +183,34 @@ class HomeViewModel(
         }
     }
 
-    private suspend fun fetchBrief(): HomeUiState = withContext(Dispatchers.IO) {
+    /** Post warmup metric to cloud. Returns true on success. */
+    private suspend fun postWarmupToCloud(date: String, medianMs: Int): Boolean {
+        return withContext(Dispatchers.IO) {
+            try {
+                val json = """{"date":"$date","median_ms":$medianMs}"""
+                val body = json.toRequestBody("application/json".toMediaType())
+                val request = Request.Builder()
+                    .url("$apiUrl/readiness/warmup")
+                    .post(body)
+                    .addHeader("Authorization", "Bearer $userToken")
+                    .addHeader("X-User-ID", userId)
+                    .addHeader("Content-Type", "application/json")
+                    .build()
+                client.newCall(request).execute().use { it.isSuccessful }
+            } catch (_: Exception) {
+                false
+            }
+        }
+    }
+
+    private data class BriefFetchResult(
+        val sessionSummary: String? = null,
+        val handoffNextAction: String? = null,
+        val success: Boolean = false,
+        val errorReason: String? = null,
+    )
+
+    private suspend fun fetchBrief(): BriefFetchResult = withContext(Dispatchers.IO) {
         try {
             val request = Request.Builder()
                 .url("$apiUrl/reflection/next-brief")
@@ -161,25 +221,34 @@ class HomeViewModel(
             client.newCall(request).execute().use { response ->
                 if (response.isSuccessful) {
                     val body = response.body?.string() ?: ""
-                    HomeUiState(
-                        isLoading = false,
+                    BriefFetchResult(
                         sessionSummary = extractString(body, "session_summary"),
                         handoffNextAction = extractString(body, "handoff_next_action"),
+                        success = true,
                     )
                 } else {
-                    HomeUiState(isLoading = false)
+                    BriefFetchResult(errorReason = "next-brief HTTP ${response.code}")
                 }
             }
-        } catch (_: Exception) {
-            HomeUiState(isLoading = false)
+        } catch (e: Exception) {
+            BriefFetchResult(errorReason = "next-brief ${e.javaClass.simpleName}")
         }
     }
 
     private fun extractString(json: String, key: String): String? =
         Regex(""""$key"\s*:\s*"([^"]+)"""").find(json)?.groupValues?.get(1)
 
-    /** Returns (scoreString, hasCheckinToday, planningAccuracyLine). Best-effort, no retries. */
-    private suspend fun fetchReadinessData(): Triple<String?, Boolean, String?> = withContext(Dispatchers.IO) {
+    private data class ReadinessFetchResult(
+        val score: String? = null,
+        val breakdown: Map<String, Float> = emptyMap(),
+        val hasCheckinToday: Boolean = false,
+        val planningLine: String? = null,
+        val success: Boolean = false,
+        val errorReason: String? = null,
+    )
+
+    /** Best-effort cloud readiness fetch; never throws. */
+    private suspend fun fetchReadinessData(): ReadinessFetchResult = withContext(Dispatchers.IO) {
         try {
             val request = Request.Builder()
                 .url("$apiUrl/readiness")
@@ -189,22 +258,33 @@ class HomeViewModel(
                 .build()
             client.newCall(request).execute().use { response ->
                 if (response.isSuccessful) {
-                    val body = response.body?.string() ?: return@withContext Triple(null, false, null)
+                    val body = response.body?.string() ?: return@withContext ReadinessFetchResult()
                     val score = Regex(""""score"\s*:\s*(\d+)""").find(body)?.groupValues?.get(1)
                     val hasCheckin = Regex(""""has_checkin_today"\s*:\s*(true|false)""")
                         .find(body)?.groupValues?.get(1) == "true"
                     val line = buildPlanningAccuracyLine(body)
-                    return@withContext Triple(score, hasCheckin, line)
+                    val breakdown = parseReadinessBreakdown(body)
+                    return@withContext ReadinessFetchResult(
+                        score = score,
+                        breakdown = breakdown,
+                        hasCheckinToday = hasCheckin,
+                        planningLine = line,
+                        success = true,
+                    )
+                } else {
+                    return@withContext ReadinessFetchResult(errorReason = "readiness HTTP ${response.code}")
                 }
             }
-        } catch (_: Exception) { }
-        Triple(null, false, null)
+        } catch (e: Exception) {
+            return@withContext ReadinessFetchResult(errorReason = "readiness ${e.javaClass.simpleName}")
+        }
+        ReadinessFetchResult()
     }
 
     private fun buildPlanningAccuracyLine(json: String): String? {
-        val planned = Regex(""""yesterday_planned_minutes"\s*:\s*(\d+)""").find(json)?.groupValues?.get(1)?.toIntOrNull()
+        val planned = parseIntField(json, "last_session_planned_minutes", "yesterday_planned_minutes")
             ?: return null
-        val actual = Regex(""""yesterday_actual_minutes"\s*:\s*(\d+)""").find(json)?.groupValues?.get(1)?.toIntOrNull()
+        val actual = parseIntField(json, "last_session_actual_minutes", "yesterday_actual_minutes")
             ?: return null
         val diff = actual - planned
         val verdict = when {
@@ -212,7 +292,41 @@ class HomeViewModel(
             diff < -5 -> "underrun ${diff}m"
             else      -> "on target"
         }
-        return "Yesterday: ${planned}m planned → ${actual}m actual ($verdict)"
+        return "Last session: ${planned}m planned → ${actual}m actual ($verdict)"
+    }
+
+    private fun parseIntField(json: String, vararg keys: String): Int? {
+        keys.forEach { key ->
+            val value = Regex("\"$key\"\\s*:\\s*(\\d+)")
+                .find(json)
+                ?.groupValues
+                ?.get(1)
+                ?.toIntOrNull()
+            if (value != null) return value
+        }
+        return null
+    }
+
+    private fun parseReadinessBreakdown(json: String): Map<String, Float> {
+        val keys = listOf("sleep_hours", "sleep_score", "rhr", "session_load", "drain_score", "cooldown_index")
+        return buildMap {
+            keys.forEach { key ->
+                val match = Regex("\"$key\"\\s*:\\s*(-?\\d+(?:\\.\\d+)?)")
+                    .find(json)
+                    ?.groupValues
+                    ?.get(1)
+                    ?.toFloatOrNull()
+                if (match != null) put(key, match)
+            }
+        }
+    }
+
+    /** Apply a recovery boost to the current readiness score. */
+    fun applyRecoveryBoost(boostPoints: Int) {
+        val current = _state.value
+        val currentScore = current.readinessScore?.toIntOrNull() ?: 50
+        val newScore = (currentScore + boostPoints).coerceAtMost(100)
+        _state.value = current.copy(readinessScore = newScore.toString())
     }
 
     companion object {
