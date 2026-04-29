@@ -47,6 +47,7 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.brainplaner.phone.LocalStore
+import com.brainplaner.phone.ui.components.BrainBudgetGauge
 import com.brainplaner.phone.ui.components.BrainCard
 import com.brainplaner.phone.ui.components.BrainChoiceChip
 import com.brainplaner.phone.ui.components.BrainDangerButton
@@ -89,7 +90,7 @@ fun HomeScreen(
     var pauseStartMs by remember { mutableLongStateOf(0L) }
 
     val context = LocalContext.current
-    var pendingRecovery by remember { mutableStateOf(LocalStore.getPendingRecovery(context)) }
+    var pendingRecoveries by remember { mutableStateOf(LocalStore.getPendingRecoveries(context).orEmpty()) }
     var isRecoveryConfirming by remember { mutableStateOf(false) }
     val spacing = BrainplanerTheme.spacing
 
@@ -284,7 +285,8 @@ fun HomeScreen(
         }
 
         // ── Recovery boost confirmation card ──
-        pendingRecovery?.let { recovery ->
+        if (pendingRecoveries.isNotEmpty()) {
+            val totalBoost = pendingRecoveries.sumOf { it.boostPoints }
             BrainCard(
                 modifier = Modifier.fillMaxWidth(),
                 containerColor = BudgetGreen.copy(alpha = 0.15f),
@@ -297,13 +299,15 @@ fun HomeScreen(
                         letterSpacing = 2.sp,
                     )
                     Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        "${recovery.emoji} ${recovery.type} — +${recovery.boostPoints} pts",
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
+                    pendingRecoveries.forEach { recovery ->
+                        Text(
+                            "${recovery.emoji} ${recovery.type} — +${recovery.boostPoints} pts",
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        "Tap 'Confirm' to apply this recovery boost to your Brain Budget.",
+                        "Total pending boost: +${totalBoost} pts. Tap 'Confirm All' to apply.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -315,21 +319,19 @@ fun HomeScreen(
                             onClick = {
                                 if (isRecoveryConfirming) return@Button
                                 isRecoveryConfirming = true
-                                viewModel.confirmRecoveryAction(
-                                    type = recovery.type,
-                                    emoji = recovery.emoji,
-                                    boostPoints = recovery.boostPoints,
-                                    selectedAtMs = recovery.selectedAt,
-                                ) { ok ->
-                                    LocalStore.clearPendingRecovery(context)
-                                    pendingRecovery = null
+                                viewModel.confirmRecoveryActions(pendingRecoveries) { successCount, totalCount ->
+                                    LocalStore.clearPendingRecoveries(context)
+                                    pendingRecoveries = emptyList()
                                     isRecoveryConfirming = false
-                                    if (ok) actionMessage = "✅ Recovery boost applied!"
-                                    else actionMessage = "⚠️ Could not sync — boost cleared locally"
+                                    actionMessage = when {
+                                        successCount == totalCount && totalCount > 0 -> "✅ Recovery boosts applied!"
+                                        successCount > 0 -> "⚠️ Applied $successCount/$totalCount boosts — some could not sync"
+                                        else -> "⚠️ Could not sync — boosts cleared locally"
+                                    }
                                 }
                             },
                             enabled = !isRecoveryConfirming,
-                            shape = RoundedCornerShape(12.dp),
+                            shape = RoundedCornerShape(BrainplanerTheme.radius.sm),
                             colors = ButtonDefaults.buttonColors(containerColor = BudgetGreen),
                         ) {
                             if (isRecoveryConfirming) {
@@ -339,15 +341,15 @@ fun HomeScreen(
                                     color = MaterialTheme.colorScheme.onPrimary,
                                 )
                             } else {
-                                Text("Confirm")
+                                Text("Confirm All")
                             }
                         }
                         OutlinedButton(
                             onClick = {
-                                LocalStore.clearPendingRecovery(context)
-                                pendingRecovery = null
+                                LocalStore.clearPendingRecoveries(context)
+                                pendingRecoveries = emptyList()
                             },
-                            shape = RoundedCornerShape(12.dp),
+                            shape = RoundedCornerShape(BrainplanerTheme.radius.sm),
                         ) {
                             Text("Dismiss")
                         }
@@ -438,7 +440,7 @@ fun HomeScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(56.dp),
-                shape = RoundedCornerShape(16.dp),
+                shape = RoundedCornerShape(BrainplanerTheme.radius.md),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = MaterialTheme.colorScheme.primary,
                 ),
@@ -541,7 +543,7 @@ fun HomeScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(48.dp),
-                shape = RoundedCornerShape(16.dp),
+                shape = RoundedCornerShape(BrainplanerTheme.radius.md),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = if (isPaused) BudgetGreen else BudgetYellow,
                 ),
@@ -579,7 +581,7 @@ fun HomeScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(56.dp),
-                shape = RoundedCornerShape(16.dp),
+                shape = RoundedCornerShape(BrainplanerTheme.radius.md),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = MaterialTheme.colorScheme.error,
                 ),
@@ -608,67 +610,6 @@ fun HomeScreen(
         }
 
         Spacer(modifier = Modifier.height(16.dp))
-    }
-}
-
-// ── Circular Brain Budget Gauge ──
-
-@Composable
-private fun BrainBudgetGauge(score: Int, modifier: Modifier = Modifier) {
-    val fraction = (score / 100f).coerceIn(0f, 1f)
-    val animatedFraction by animateFloatAsState(
-        targetValue = fraction,
-        animationSpec = tween(durationMillis = 800),
-        label = "gauge",
-    )
-    val gaugeColor = when {
-        score >= 70 -> BudgetGreen
-        score >= 40 -> BudgetYellow
-        else -> BudgetRed
-    }
-    val trackColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f)
-
-    Box(modifier = modifier, contentAlignment = Alignment.Center) {
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            val strokeWidth = 14.dp.toPx()
-            val arcSize = Size(size.width - strokeWidth, size.height - strokeWidth)
-            val topLeft = Offset(strokeWidth / 2, strokeWidth / 2)
-
-            // Track
-            drawArc(
-                color = trackColor,
-                startAngle = 135f,
-                sweepAngle = 270f,
-                useCenter = false,
-                topLeft = topLeft,
-                size = arcSize,
-                style = Stroke(width = strokeWidth, cap = StrokeCap.Round),
-            )
-            // Fill
-            drawArc(
-                color = gaugeColor,
-                startAngle = 135f,
-                sweepAngle = 270f * animatedFraction,
-                useCenter = false,
-                topLeft = topLeft,
-                size = arcSize,
-                style = Stroke(width = strokeWidth, cap = StrokeCap.Round),
-            )
-        }
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(
-                "$score",
-                style = MaterialTheme.typography.displayLarge.copy(
-                    color = gaugeColor,
-                    fontWeight = FontWeight.Bold,
-                ),
-            )
-            Text(
-                "/ 100",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
     }
 }
 

@@ -1,8 +1,5 @@
 package com.brainplaner.phone.ui.budget
 
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -29,17 +26,14 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.brainplaner.phone.LocalStore
+import com.brainplaner.phone.ui.components.BrainBudgetGauge
 import com.brainplaner.phone.ui.home.HomeViewModel
 import com.brainplaner.phone.ui.theme.BrainplanerTheme
 import com.brainplaner.phone.ui.theme.BudgetGreen
@@ -149,7 +143,12 @@ fun BudgetDetailScreen(
                 .padding(vertical = spacing.xs),
             contentAlignment = Alignment.Center,
         ) {
-            BudgetGauge(score = score, modifier = Modifier.size(180.dp))
+            BrainBudgetGauge(
+                score = score,
+                modifier = Modifier.size(180.dp),
+                scoreTextStyle = MaterialTheme.typography.displayMedium,
+                useScoreColorForText = false,
+            )
         }
 
         Spacer(modifier = Modifier.height(spacing.xs))
@@ -179,7 +178,7 @@ fun BudgetDetailScreen(
         Spacer(modifier = Modifier.height(spacing.sm))
 
         Card(
-            shape = RoundedCornerShape(16.dp),
+            shape = RoundedCornerShape(BrainplanerTheme.radius.lg),
             colors = CardDefaults.cardColors(containerColor = BrainplanerTheme.surfaceRoles.surface2),
             modifier = Modifier.fillMaxWidth(),
         ) {
@@ -200,7 +199,7 @@ fun BudgetDetailScreen(
         Spacer(modifier = Modifier.height(spacing.md))
 
         Card(
-            shape = RoundedCornerShape(16.dp),
+            shape = RoundedCornerShape(BrainplanerTheme.radius.lg),
             colors = CardDefaults.cardColors(containerColor = BrainplanerTheme.surfaceRoles.surface2),
             modifier = Modifier.fillMaxWidth(),
         ) {
@@ -270,63 +269,6 @@ private fun CategoryRow(category: Category) {
             style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
             color = pointsColor(category.points),
         )
-    }
-}
-
-@Composable
-private fun BudgetGauge(score: Int, modifier: Modifier = Modifier) {
-    val fraction = (score / 100f).coerceIn(0f, 1f)
-    val animatedFraction by animateFloatAsState(
-        targetValue = fraction,
-        animationSpec = tween(durationMillis = 800),
-        label = "budget_gauge",
-    )
-
-    val gaugeColor = when {
-        score >= 70 -> BudgetGreen
-        score >= 40 -> BudgetYellow
-        else -> BudgetRed
-    }
-    val trackColor = Color.Gray.copy(alpha = 0.2f)
-
-    Box(modifier = modifier, contentAlignment = Alignment.Center) {
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            val strokeWidth = 14.dp.toPx()
-            val arcSize = Size(size.width - strokeWidth, size.height - strokeWidth)
-            val topLeft = Offset(strokeWidth / 2f, strokeWidth / 2f)
-
-            drawArc(
-                color = trackColor,
-                startAngle = 135f,
-                sweepAngle = 270f,
-                useCenter = false,
-                topLeft = topLeft,
-                size = arcSize,
-                style = Stroke(width = strokeWidth, cap = StrokeCap.Round),
-            )
-
-            drawArc(
-                color = gaugeColor,
-                startAngle = 135f,
-                sweepAngle = 270f * animatedFraction,
-                useCenter = false,
-                topLeft = topLeft,
-                size = arcSize,
-                style = Stroke(width = strokeWidth, cap = StrokeCap.Round),
-            )
-        }
-
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(
-                text = "$score",
-                style = MaterialTheme.typography.displayMedium.copy(fontWeight = FontWeight.Bold),
-            )
-            Text(
-                text = "/ 100",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
     }
 }
 

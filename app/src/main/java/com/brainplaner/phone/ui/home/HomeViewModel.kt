@@ -223,12 +223,42 @@ class HomeViewModel(
         selectedAtMs: Long,
         onResult: (Boolean) -> Unit,
     ) {
+        confirmRecoveryActions(
+            actions = listOf(
+                LocalStore.PendingRecoveryData(
+                    type = type,
+                    emoji = emoji,
+                    boostPoints = boostPoints,
+                    selectedAt = selectedAtMs,
+                ),
+            ),
+        ) { successCount, _ ->
+            onResult(successCount > 0)
+        }
+    }
+
+    /** Confirm multiple recovery actions in cloud so all selected boosts are applied. */
+    fun confirmRecoveryActions(
+        actions: List<LocalStore.PendingRecoveryData>,
+        onResult: (successCount: Int, totalCount: Int) -> Unit,
+    ) {
         viewModelScope.launch {
-            val previousScore = _state.value.readinessScore
-            val ok = withContext(Dispatchers.IO) {
-                postRecoveryActionToCloud(type, emoji, boostPoints, selectedAtMs)
+            if (actions.isEmpty()) {
+                onResult(0, 0)
+                return@launch
             }
-            if (ok) {
+            val previousScore = _state.value.readinessScore
+            val successCount = withContext(Dispatchers.IO) {
+                actions.count { action ->
+                    postRecoveryActionToCloud(
+                        type = action.type,
+                        emoji = action.emoji,
+                        boostPoints = action.boostPoints,
+                        selectedAtMs = action.selectedAt,
+                    )
+                }
+            }
+            if (successCount > 0) {
                 // Pull updated readiness with short retries to absorb eventual consistency.
                 for (attempt in 0 until 3) {
                     tryEnrichFromCloud()
@@ -239,7 +269,7 @@ class HomeViewModel(
                     if (attempt < 2) delay(900L)
                 }
             }
-            onResult(ok)
+            onResult(successCount, actions.size)
         }
     }
 
@@ -365,9 +395,9 @@ class HomeViewModel(
     /** Best-effort cloud readiness fetch; never throws. */
     private suspend fun fetchReadinessData(): ReadinessFetchResult = withContext(Dispatchers.IO) {
         try {
-            val selectedProfile = LocalStore.getReadinessTuningProfile(ctx)
+            val goalTier = LocalStore.getGoalTier(ctx)
             val request = Request.Builder()
-                .url("$apiUrl/readiness?profile=$selectedProfile")
+                .url("$apiUrl/readiness?goal=$goalTier")
                 .get()
                 .addHeader("Authorization", "Bearer $userToken")
                 .addHeader("X-User-ID", userId)

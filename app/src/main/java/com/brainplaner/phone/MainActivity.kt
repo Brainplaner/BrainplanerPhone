@@ -33,11 +33,16 @@ class MainActivity : ComponentActivity() {
         .build()
 
     // Cloud API Configuration
-    // Use local network URL when on same Wi-Fi: http://192.168.0.23:8501
-    // Use Render when remote: https://brainplaner-api-beta.onrender.com
+    // Emulator → host:                 http://10.0.2.2:8000
+    // Physical phone on same Wi-Fi:    http://<dev-machine-LAN-IP>:8000
+    // Deployed:                        https://brainplaner-api-beta.onrender.com
+    // private val CLOUD_API_URL = "http://10.0.2.2:8000"
     private val CLOUD_API_URL = "https://brainplaner-api-beta.onrender.com"
     private val SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1obW1pYXFhcW9kZGxreXppYXRpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njc5NjQ2NDcsImV4cCI6MjA4MzU0MDY0N30.zN5bUHUWDqo2RASQkd-FQyTy01pwi_xFLVs2CpPZMXg"
-    private val USER_TOKEN = SUPABASE_ANON_KEY  // For beta
+    // Per-user JWT minted by POST /beta/claim and stored in UserAuth.
+    // Falls back to the anon key only as a last resort (e.g. token cleared mid-session).
+    private fun userToken(): String =
+        UserAuth.getAccessToken(this) ?: SUPABASE_ANON_KEY
 
     // Supabase for legacy polling
     private val SUPABASE_URL = "https://mhmmiaqaqoddlkyziati.supabase.co"
@@ -90,8 +95,14 @@ class MainActivity : ComponentActivity() {
             setContent {
                 BrainplanerPhoneTheme {
                     LoginScreen(
-                        onLogin = { userId ->
-                            UserAuth.saveUserId(this, userId)
+                        apiUrl = CLOUD_API_URL,
+                        onLogin = { claimed ->
+                            UserAuth.saveSession(
+                                this,
+                                userId = claimed.userId,
+                                accessToken = claimed.accessToken,
+                                expiresAt = claimed.expiresAt,
+                            )
                             recreate()
                         }
                     )
@@ -137,7 +148,7 @@ class MainActivity : ComponentActivity() {
                 AppNavigation(
                     userId = userId,
                     apiUrl = CLOUD_API_URL,
-                    userToken = USER_TOKEN,
+                    userToken = userToken(),
                     getActiveSessionId = { activeSessionId },
                     onStartSession = { minutes -> startSession(minutes) },
                     onStopSession = { stopSession() },
@@ -192,7 +203,7 @@ class MainActivity : ComponentActivity() {
             val request = Request.Builder()
                 .url("$CLOUD_API_URL/sessions/start")
                 .post(body)
-                .addHeader("Authorization", "Bearer $USER_TOKEN")
+                .addHeader("Authorization", "Bearer ${userToken()}")
                 .addHeader("X-User-ID", userId)
                 .addHeader("Content-Type", "application/json")
                 .build()
@@ -221,7 +232,7 @@ class MainActivity : ComponentActivity() {
                                 val endReq = Request.Builder()
                                     .url("$CLOUD_API_URL/sessions/$staleId/end")
                                     .post("{}".toRequestBody("application/json".toMediaType()))
-                                    .addHeader("Authorization", "Bearer $USER_TOKEN")
+                                    .addHeader("Authorization", "Bearer ${userToken()}")
                                     .addHeader("X-User-ID", userId)
                                     .build()
                                 runCatching { client.newCall(endReq).execute().close() }
@@ -267,7 +278,9 @@ class MainActivity : ComponentActivity() {
         val stoppedId = id
         activeSessionId = null
         LocalStore.clearActiveSession(this@MainActivity)
-        PhoneAwarenessService.stop(this@MainActivity)
+        // Don't stopService — that kills polling + in-memory state, so cooldown only
+        // runs if the user completes reflection. Hand the service straight into cooldown.
+        PhoneAwarenessService.startCooldownForSession(this@MainActivity, stoppedId)
         android.util.Log.i("MainActivity", "Local session stopped: $stoppedId")
 
         // 2. Try cloud sync in background (only for cloud-synced sessions).
@@ -278,7 +291,7 @@ class MainActivity : ComponentActivity() {
                 val request = Request.Builder()
                     .url("$CLOUD_API_URL/sessions/$stoppedId/end")
                     .post(body)
-                    .addHeader("Authorization", "Bearer $USER_TOKEN")
+                    .addHeader("Authorization", "Bearer ${userToken()}")
                     .addHeader("X-User-ID", userId)
                     .addHeader("Content-Type", "application/json")
                     .build()
@@ -323,7 +336,7 @@ class MainActivity : ComponentActivity() {
                 val request = Request.Builder()
                     .url("$CLOUD_API_URL/sessions/$id/pause")
                     .post(body)
-                    .addHeader("Authorization", "Bearer $USER_TOKEN")
+                    .addHeader("Authorization", "Bearer ${userToken()}")
                     .addHeader("X-User-ID", userId)
                     .addHeader("Content-Type", "application/json")
                     .build()
@@ -368,7 +381,7 @@ class MainActivity : ComponentActivity() {
                 val request = Request.Builder()
                     .url("$CLOUD_API_URL/sessions/$id/resume")
                     .post(body)
-                    .addHeader("Authorization", "Bearer $USER_TOKEN")
+                    .addHeader("Authorization", "Bearer ${userToken()}")
                     .addHeader("X-User-ID", userId)
                     .addHeader("Content-Type", "application/json")
                     .build()

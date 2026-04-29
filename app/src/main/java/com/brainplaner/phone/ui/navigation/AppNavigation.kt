@@ -5,13 +5,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -32,6 +32,8 @@ import com.brainplaner.phone.ui.budget.BudgetDetailScreen
 import com.brainplaner.phone.ui.home.DailyCheckInScreen
 import com.brainplaner.phone.ui.home.HomeScreen
 import com.brainplaner.phone.ui.home.HomeViewModel
+import com.brainplaner.phone.ui.progress.ProgressScreen
+import com.brainplaner.phone.ui.progress.ProgressViewModel
 import com.brainplaner.phone.ui.reflection.ReflectionScreen
 import com.brainplaner.phone.ui.reflection.ReflectionViewModel
 import com.brainplaner.phone.ui.settings.SettingsScreen
@@ -59,15 +61,16 @@ fun AppNavigation(
     )
     val pendingReflectionSessionId = LocalStore.getPendingReflectionRouteSessionId(application)
     val startDestination = pendingReflectionSessionId?.let { Screen.Reflection.route(it) }
-        ?: Screen.CognitiveWarmup.route
+        ?: Screen.DailyCheckIn.route
 
     val navItems = listOf(
         NavItem("Home", Screen.Home.route) { Icon(Icons.Default.Home, contentDescription = "Home") },
+        NavItem("Progress", Screen.Progress.route) { Icon(Icons.Default.Star, contentDescription = "Progress") },
         NavItem("Settings", Screen.Settings.route) { Icon(Icons.Default.Settings, contentDescription = "Settings") },
     )
 
     // Screens that show the bottom bar
-    val navBarRoutes = setOf(Screen.Home.route, Screen.Settings.route)
+    val navBarRoutes = setOf(Screen.Home.route, Screen.Progress.route, Screen.Settings.route)
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = navBackStackEntry?.destination?.route
     val showBottomBar = currentRoute in navBarRoutes
@@ -105,28 +108,14 @@ fun AppNavigation(
             modifier = if (showBottomBar) Modifier.padding(innerPadding) else Modifier,
         ) {
             composable(Screen.CognitiveWarmup.route) {
-                if (!LocalStore.isWarmupEnabled(application) || LocalStore.getTodayWarmupData(application) != null) {
-                    LaunchedEffect(Unit) {
-                        navController.navigate(Screen.DailyCheckIn.route) {
-                            popUpTo(Screen.CognitiveWarmup.route) { inclusive = true }
-                        }
-                    }
-                    return@composable
-                }
                 CognitiveWarmupScreen(
                     baselineMs = LocalStore.getWarmupBaseline(application),
                     onComplete = { medianMs ->
                         LocalStore.saveWarmupResult(application, medianMs)
                         homeViewModel.refreshCloudData()
-                        navController.navigate(Screen.DailyCheckIn.route) {
-                            popUpTo(Screen.CognitiveWarmup.route) { inclusive = true }
-                        }
+                        navController.popBackStack()
                     },
-                    onSkip = {
-                        navController.navigate(Screen.DailyCheckIn.route) {
-                            popUpTo(Screen.CognitiveWarmup.route) { inclusive = true }
-                        }
-                    },
+                    onSkip = { navController.popBackStack() },
                 )
             }
             composable(Screen.DailyCheckIn.route) {
@@ -169,12 +158,24 @@ fun AppNavigation(
                             popUpTo(Screen.Home.route) { inclusive = true }
                         }
                     },
+                    onRunWarmup = {
+                        navController.navigate(Screen.CognitiveWarmup.route)
+                    },
                     onLogout = onLogout,
                 )
             }
             composable(Screen.BudgetDetail.route) {
                 BudgetDetailScreen(
                     viewModel = homeViewModel,
+                    onBack = { navController.popBackStack() },
+                )
+            }
+            composable(Screen.Progress.route) {
+                val progressViewModel: ProgressViewModel = viewModel(
+                    factory = ProgressViewModel.factory(application, userId, apiUrl, userToken)
+                )
+                ProgressScreen(
+                    viewModel = progressViewModel,
                     onBack = { navController.popBackStack() },
                 )
             }

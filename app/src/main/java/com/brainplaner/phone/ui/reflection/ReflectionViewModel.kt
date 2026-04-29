@@ -6,7 +6,6 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.brainplaner.phone.LocalStore
-import com.brainplaner.phone.PhoneAwarenessService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -113,9 +112,6 @@ class ReflectionViewModel(
                 )
             }
             if (cloudOk) LocalStore.clearPendingReflection(ctx)
-
-            // Start 15-min post-session cooldown tracking (phone unlocks, screen time).
-            PhoneAwarenessService.startCooldownForSession(ctx, sessionId)
 
             _state.value = _state.value.copy(isSubmitting = false, isSubmitted = true)
         }

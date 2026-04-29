@@ -8,6 +8,8 @@ import java.util.Locale
 import java.util.TimeZone
 import java.util.Calendar
 import java.util.UUID
+import org.json.JSONArray
+import org.json.JSONObject
 
 /**
  * Local-first storage using SharedPreferences.
@@ -16,14 +18,14 @@ import java.util.UUID
  */
 object LocalStore {
     private const val PREFS = "brainplaner_local"
-    private const val KEY_READINESS_TUNING_PROFILE = "readiness_tuning_profile"
     const val REFLECTION_STAGE_FORM = "form"
     const val REFLECTION_STAGE_SESSION_TRUTH = "session_truth"
     const val REFLECTION_STAGE_RECOVERY = "recovery"
     const val REFLECTION_STAGE_COOLDOWN = "cooldown"
-    const val READINESS_PROFILE_DEFAULT = "default"
-    const val READINESS_PROFILE_CONSERVATIVE = "conservative"
-    const val READINESS_PROFILE_AGGRESSIVE = "aggressive"
+    const val GOAL_TIER_EFFICIENCY = "efficiency"
+    const val GOAL_TIER_CAPACITY = "capacity"
+    const val GOAL_TIER_GROWTH = "growth"
+    private const val KEY_GOAL_TIER = "user_goal_tier"
 
     private fun prefs(ctx: Context): SharedPreferences =
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -267,36 +269,24 @@ object LocalStore {
             ?: REFLECTION_STAGE_FORM
     }
 
-    // ── Cognitive warm-up ────────────────────────────────────────
+    // ── User goal tier ─────────────────────────────────────────
 
-    fun isWarmupEnabled(ctx: Context): Boolean =
-        prefs(ctx).getBoolean("warmup_enabled", false)
-
-    fun setWarmupEnabled(ctx: Context, enabled: Boolean) {
-        prefs(ctx).edit().putBoolean("warmup_enabled", enabled).apply()
-    }
-
-    // ── Readiness tuning profile ───────────────────────────────
-
-    fun getReadinessTuningProfile(ctx: Context): String {
-        val value = prefs(ctx).getString(KEY_READINESS_TUNING_PROFILE, READINESS_PROFILE_DEFAULT)
-            ?: READINESS_PROFILE_DEFAULT
+    fun getGoalTier(ctx: Context): String {
+        val value = prefs(ctx).getString(KEY_GOAL_TIER, GOAL_TIER_EFFICIENCY)
+            ?: GOAL_TIER_EFFICIENCY
         return when (value) {
-            READINESS_PROFILE_CONSERVATIVE,
-            READINESS_PROFILE_AGGRESSIVE,
-            READINESS_PROFILE_DEFAULT,
-            -> value
-            else -> READINESS_PROFILE_DEFAULT
+            GOAL_TIER_CAPACITY, GOAL_TIER_GROWTH, GOAL_TIER_EFFICIENCY -> value
+            else -> GOAL_TIER_EFFICIENCY
         }
     }
 
-    fun setReadinessTuningProfile(ctx: Context, profile: String) {
-        val normalized = when (profile.lowercase(Locale.US)) {
-            READINESS_PROFILE_CONSERVATIVE -> READINESS_PROFILE_CONSERVATIVE
-            READINESS_PROFILE_AGGRESSIVE -> READINESS_PROFILE_AGGRESSIVE
-            else -> READINESS_PROFILE_DEFAULT
+    fun setGoalTier(ctx: Context, tier: String) {
+        val normalized = when (tier.lowercase(Locale.US)) {
+            GOAL_TIER_CAPACITY -> GOAL_TIER_CAPACITY
+            GOAL_TIER_GROWTH -> GOAL_TIER_GROWTH
+            else -> GOAL_TIER_EFFICIENCY
         }
-        prefs(ctx).edit().putString(KEY_READINESS_TUNING_PROFILE, normalized).apply()
+        prefs(ctx).edit().putString(KEY_GOAL_TIER, normalized).apply()
     }
 
     fun saveWarmupResult(ctx: Context, medianMs: Int) {
@@ -350,35 +340,95 @@ object LocalStore {
         val selectedAt: Long,
     )
 
-    fun savePendingRecovery(ctx: Context, type: String, emoji: String, boostPoints: Int) {
+    private const val KEY_RECOVERY_PENDING = "recovery_pending"
+    private const val KEY_RECOVERY_PENDING_LIST = "recovery_pending_list"
+
+    fun savePendingRecoveries(ctx: Context, actions: List<PendingRecoveryData>) {
+        if (actions.isEmpty()) {
+            clearPendingRecoveries(ctx)
+            return
+        }
+        val arr = JSONArray().apply {
+            actions.forEach { action ->
+                put(
+                    JSONObject()
+                        .put("type", action.type)
+                        .put("emoji", action.emoji)
+                        .put("boostPoints", action.boostPoints)
+                        .put("selectedAt", action.selectedAt),
+                )
+            }
+        }
         prefs(ctx).edit()
-            .putString("recovery_type", type)
-            .putString("recovery_emoji", emoji)
-            .putInt("recovery_boost", boostPoints)
-            .putLong("recovery_selected_at", System.currentTimeMillis())
-            .putBoolean("recovery_pending", true)
+            .putString(KEY_RECOVERY_PENDING_LIST, arr.toString())
+            .putBoolean(KEY_RECOVERY_PENDING, true)
             .apply()
     }
 
-    fun getPendingRecovery(ctx: Context): PendingRecoveryData? {
+    fun getPendingRecoveries(ctx: Context): List<PendingRecoveryData>? {
         val p = prefs(ctx)
-        if (!p.getBoolean("recovery_pending", false)) return null
-        return PendingRecoveryData(
+        val raw = p.getString(KEY_RECOVERY_PENDING_LIST, null)
+        if (!raw.isNullOrBlank()) {
+            try {
+                val arr = JSONArray(raw)
+                val list = mutableListOf<PendingRecoveryData>()
+                for (i in 0 until arr.length()) {
+                    val obj = arr.optJSONObject(i) ?: continue
+                    list.add(
+                        PendingRecoveryData(
+                            type = obj.optString("type", ""),
+                            emoji = obj.optString("emoji", ""),
+                            boostPoints = obj.optInt("boostPoints", 0),
+                            selectedAt = obj.optLong("selectedAt", 0L),
+                        ),
+                    )
+                }
+                if (list.isNotEmpty()) return list
+            } catch (_: Exception) {
+                // Fall through to legacy single-action keys.
+            }
+        }
+        if (!p.getBoolean(KEY_RECOVERY_PENDING, false)) return null
+        val legacy = PendingRecoveryData(
             type = p.getString("recovery_type", "") ?: "",
             emoji = p.getString("recovery_emoji", "") ?: "",
             boostPoints = p.getInt("recovery_boost", 0),
             selectedAt = p.getLong("recovery_selected_at", 0L),
         )
+        return listOf(legacy)
     }
 
-    fun clearPendingRecovery(ctx: Context) {
+    fun clearPendingRecoveries(ctx: Context) {
         prefs(ctx).edit()
+            .remove(KEY_RECOVERY_PENDING_LIST)
             .remove("recovery_type")
             .remove("recovery_emoji")
             .remove("recovery_boost")
             .remove("recovery_selected_at")
-            .putBoolean("recovery_pending", false)
+            .putBoolean(KEY_RECOVERY_PENDING, false)
             .apply()
+    }
+
+    fun savePendingRecovery(ctx: Context, type: String, emoji: String, boostPoints: Int) {
+        savePendingRecoveries(
+            ctx,
+            listOf(
+                PendingRecoveryData(
+                    type = type,
+                    emoji = emoji,
+                    boostPoints = boostPoints,
+                    selectedAt = System.currentTimeMillis(),
+                ),
+            ),
+        )
+    }
+
+    fun getPendingRecovery(ctx: Context): PendingRecoveryData? {
+        return getPendingRecoveries(ctx)?.firstOrNull()
+    }
+
+    fun clearPendingRecovery(ctx: Context) {
+        clearPendingRecoveries(ctx)
     }
 
     data class ActiveSession(

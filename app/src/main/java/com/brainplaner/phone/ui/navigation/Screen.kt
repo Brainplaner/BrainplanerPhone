@@ -5,6 +5,7 @@ sealed class Screen(val route: String) {
     object CognitiveWarmup : Screen("cognitive_warmup")
     object Home : Screen("home")
     object BudgetDetail : Screen("budget_detail")
+    object Progress : Screen("progress")
     object Settings : Screen("settings")
     object Session : Screen("session")
     object Reflection : Screen("reflection/{sessionId}") {

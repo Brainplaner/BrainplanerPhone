@@ -43,6 +43,78 @@ import com.brainplaner.phone.ui.theme.BudgetGreen
 import com.brainplaner.phone.ui.theme.BudgetRed
 import com.brainplaner.phone.ui.theme.BudgetYellow
 
+private data class AnchoredScore(val score: Int, val label: String, val anchor: String)
+
+private val FocusAnchors = listOf(
+    AnchoredScore(5, "Flow state", "Lost track of time, deep in the work"),
+    AnchoredScore(4, "Focused", "Mostly uninterrupted, few breaks"),
+    AnchoredScore(3, "Moderate", "Some distractions but got work done"),
+    AnchoredScore(2, "Scattered", "Started working but frequently drifted"),
+    AnchoredScore(1, "Couldn't focus", "Kept picking up phone, couldn't settle"),
+)
+private val DrainAnchors = listOf(
+    AnchoredScore(5, "Depleted", "Done for the day, can't concentrate"),
+    AnchoredScore(4, "Drained", "Brain feels slow, making mistakes"),
+    AnchoredScore(3, "Tired", "Need a real break before more work"),
+    AnchoredScore(2, "Mild fatigue", "Fine but wouldn't want a hard task next"),
+    AnchoredScore(1, "Energized", "Could do another session right now"),
+)
+private val AlignmentAnchors = listOf(
+    AnchoredScore(3, "Fully aligned", "I did the exact next step I planned"),
+    AnchoredScore(2, "Mostly aligned", "I worked in the same direction with minor drift"),
+    AnchoredScore(1, "Partly aligned", "I touched it, but drifted to other work"),
+    AnchoredScore(0, "Not aligned", "I didn't follow the previous next step"),
+)
+
+@Composable
+private fun AnchorScaleCard(
+    title: String,
+    anchors: List<AnchoredScore>,
+    selectedScore: Int?,
+    onSelect: (Int) -> Unit,
+    subtitle: String? = null,
+) {
+    val spacing = BrainplanerTheme.spacing
+    BrainCard(
+        modifier = Modifier.fillMaxWidth(),
+        containerColor = BrainplanerTheme.surfaceRoles.surface2,
+    ) {
+        Column(modifier = Modifier.padding(spacing.md), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(
+                title,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                letterSpacing = 2.sp,
+            )
+            if (subtitle != null) {
+                Text(
+                    subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Spacer(modifier = Modifier.height(spacing.xxs))
+            anchors.forEach { item ->
+                BrainChoiceChip(
+                    selected = selectedScore == item.score,
+                    onClick = { onSelect(item.score) },
+                    label = {
+                        Column(modifier = Modifier.padding(vertical = 4.dp)) {
+                            Text("${item.score}. ${item.label}", style = MaterialTheme.typography.labelMedium)
+                            Text(
+                                item.anchor,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
+    }
+}
+
 @Composable
 fun ReflectionScreen(
     viewModel: ReflectionViewModel,
@@ -50,6 +122,7 @@ fun ReflectionScreen(
 ) {
     val state by viewModel.state.collectAsState()
     var showRecovery by remember { mutableStateOf(false) }
+    var showCooldownReminder by remember { mutableStateOf(true) }
     var submittedDrainScore by remember { mutableIntStateOf(3) }
 
     LaunchedEffect(state.isSubmitted) {
@@ -66,36 +139,24 @@ fun ReflectionScreen(
         return
     }
 
+    if (showCooldownReminder) {
+        CooldownReminderScreen(onDone = { showCooldownReminder = false })
+        return
+    }
+
     var focusScore by remember { mutableIntStateOf(0) }
     var drainScore by remember { mutableIntStateOf(0) }
-    var alignmentScore by remember { mutableIntStateOf(0) }
+    var alignmentScore by remember { mutableStateOf<Int?>(null) }
     var handoffNextAction by remember { mutableStateOf("") }
     var note by remember { mutableStateOf("") }
 
-    data class AnchoredScore(val score: Int, val label: String, val anchor: String)
+    val previousNextStep = state.previousNextStep?.takeIf { it.isNotBlank() }
+    val alignmentRequired = previousNextStep != null
 
-    val focusAnchors = listOf(
-        AnchoredScore(5, "Flow state", "Lost track of time, deep in the work"),
-        AnchoredScore(4, "Focused", "Mostly uninterrupted, few breaks"),
-        AnchoredScore(3, "Moderate", "Some distractions but got work done"),
-        AnchoredScore(2, "Scattered", "Started working but frequently drifted"),
-        AnchoredScore(1, "Couldn't focus", "Kept picking up phone, couldn't settle"),
-    )
-    val drainAnchors = listOf(
-        AnchoredScore(5, "Depleted", "Done for the day, can't concentrate"),
-        AnchoredScore(4, "Drained", "Brain feels slow, making mistakes"),
-        AnchoredScore(3, "Tired", "Need a real break before more work"),
-        AnchoredScore(2, "Mild fatigue", "Fine but wouldn't want a hard task next"),
-        AnchoredScore(1, "Energized", "Could do another session right now"),
-    )
-    val alignmentAnchors = listOf(
-        AnchoredScore(3, "Fully aligned", "I did the exact next step I planned"),
-        AnchoredScore(2, "Mostly aligned", "I worked in the same direction with minor drift"),
-        AnchoredScore(1, "Partly aligned", "I touched it, but drifted to other work"),
-        AnchoredScore(0, "Not aligned", "I didn't follow the previous next step"),
-    )
-
-    val canSubmit = focusScore > 0 && drainScore > 0 && handoffNextAction.isNotBlank()
+    val canSubmit = focusScore > 0 &&
+        drainScore > 0 &&
+        handoffNextAction.isNotBlank() &&
+        (!alignmentRequired || alignmentScore != null)
     val spacing = BrainplanerTheme.spacing
 
     Column(
@@ -113,72 +174,31 @@ fun ReflectionScreen(
 
         Spacer(modifier = Modifier.height(spacing.lg))
 
-        // Primary validator: Focus (1–5)
-        BrainCard(
-            modifier = Modifier.fillMaxWidth(),
-            containerColor = BrainplanerTheme.surfaceRoles.surface2,
-        ) {
-            Column(modifier = Modifier.padding(spacing.md), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(
-                    "HOW FOCUSED WERE YOU?",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    letterSpacing = 2.sp,
-                )
-                Spacer(modifier = Modifier.height(spacing.xxs))
-                focusAnchors.forEach { item ->
-                    BrainChoiceChip(
-                        selected = focusScore == item.score,
-                        onClick = { focusScore = item.score },
-                        label = {
-                            Column(modifier = Modifier.padding(vertical = 4.dp)) {
-                                Text("${item.score}. ${item.label}", style = MaterialTheme.typography.labelMedium)
-                                Text(
-                                    item.anchor,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                }
-            }
-        }
+        AnchorScaleCard(
+            title = "HOW FOCUSED WERE YOU?",
+            anchors = FocusAnchors,
+            selectedScore = focusScore.takeIf { it > 0 },
+            onSelect = { focusScore = it },
+        )
 
         Spacer(modifier = Modifier.height(spacing.md))
 
-        // Secondary validator: Mental drain (1–5)
-        BrainCard(
-            modifier = Modifier.fillMaxWidth(),
-            containerColor = BrainplanerTheme.surfaceRoles.surface2,
-        ) {
-            Column(modifier = Modifier.padding(spacing.md), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(
-                    "HOW MENTALLY DRAINED DO YOU FEEL?",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    letterSpacing = 2.sp,
-                )
-                Spacer(modifier = Modifier.height(spacing.xxs))
-                drainAnchors.forEach { item ->
-                    BrainChoiceChip(
-                        selected = drainScore == item.score,
-                        onClick = { drainScore = item.score },
-                        label = {
-                            Column(modifier = Modifier.padding(vertical = 4.dp)) {
-                                Text("${item.score}. ${item.label}", style = MaterialTheme.typography.labelMedium)
-                                Text(
-                                    item.anchor,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                }
-            }
+        AnchorScaleCard(
+            title = "HOW MENTALLY DRAINED DO YOU FEEL?",
+            anchors = DrainAnchors,
+            selectedScore = drainScore.takeIf { it > 0 },
+            onSelect = { drainScore = it },
+        )
+
+        if (alignmentRequired) {
+            Spacer(modifier = Modifier.height(spacing.md))
+            AnchorScaleCard(
+                title = "HOW ALIGNED WAS THIS SESSION?",
+                subtitle = "Previous next-step: \"$previousNextStep\"",
+                anchors = AlignmentAnchors,
+                selectedScore = alignmentScore,
+                onSelect = { alignmentScore = it },
+            )
         }
 
         Spacer(modifier = Modifier.height(spacing.md))
@@ -232,7 +252,7 @@ fun ReflectionScreen(
                 viewModel.submit(
                     focusScore = focusScore,
                     drainScore = drainScore,
-                    alignmentScore = alignmentScore,
+                    alignmentScore = alignmentScore ?: 0,
                     handoffNextAction = handoffNextAction,
                     note = note.takeIf { it.isNotBlank() },
                 )
@@ -254,9 +274,15 @@ fun ReflectionScreen(
             }
         }
 
-        TextButton(onClick = onDone) {
+        TextButton(onClick = { showCooldownReminder = true }) {
             Text("Skip for now", color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
+
+        Text(
+            "📵 Put your phone away for better recovery",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
 
         Spacer(modifier = Modifier.height(spacing.xxl))
     }
@@ -456,7 +482,7 @@ private fun RecoverySuggestionsScreen(
 ) {
     val context = LocalContext.current
     val actions = buildRecoveryActions(drainScore)
-    var selectedIndex by remember { mutableIntStateOf(-1) }
+    var selectedIndices by remember { mutableStateOf(setOf<Int>()) }
     val spacing = BrainplanerTheme.spacing
 
     Column(
@@ -473,7 +499,7 @@ private fun RecoverySuggestionsScreen(
         )
         Spacer(modifier = Modifier.height(4.dp))
         Text(
-            "Pick one — confirm when you're back",
+            "Pick one or more — confirm when you're back",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -481,9 +507,15 @@ private fun RecoverySuggestionsScreen(
         Spacer(modifier = Modifier.height(spacing.lg))
 
         actions.forEachIndexed { index, action ->
-            val isSelected = selectedIndex == index
+            val isSelected = selectedIndices.contains(index)
             BrainCard(
-                onClick = { selectedIndex = if (isSelected) -1 else index },
+                onClick = {
+                    selectedIndices = if (isSelected) {
+                        selectedIndices - index
+                    } else {
+                        selectedIndices + index
+                    }
+                },
                 modifier = Modifier.fillMaxWidth(),
                 containerColor = if (isSelected) BudgetGreen.copy(alpha = 0.15f) else BrainplanerTheme.surfaceRoles.surface2,
             ) {
@@ -570,28 +602,42 @@ private fun RecoverySuggestionsScreen(
 
         BrainPrimaryButton(
             onClick = {
-                if (selectedIndex >= 0) {
-                    val picked = actions[selectedIndex]
-                    LocalStore.savePendingRecovery(
-                        context,
-                        type = picked.title,
-                        emoji = picked.emoji,
-                        boostPoints = picked.boostPoints,
-                    )
+                if (selectedIndices.isNotEmpty()) {
+                    val selectedActions = selectedIndices
+                        .sorted()
+                        .map { idx ->
+                            val picked = actions[idx]
+                            LocalStore.PendingRecoveryData(
+                                type = picked.title,
+                                emoji = picked.emoji,
+                                boostPoints = picked.boostPoints,
+                                selectedAt = System.currentTimeMillis(),
+                            )
+                        }
+                    LocalStore.savePendingRecoveries(context, selectedActions)
                 }
                 onDone()
             },
-            containerColor = if (selectedIndex >= 0) BudgetGreen else MaterialTheme.colorScheme.primary,
+            containerColor = if (selectedIndices.isNotEmpty()) BudgetGreen else MaterialTheme.colorScheme.primary,
             modifier = Modifier
                 .fillMaxWidth()
                 .height(56.dp),
         ) {
             Text(
-                if (selectedIndex >= 0) "Start ${actions[selectedIndex].title} — Back to Home"
-                else "Skip — Back to Home",
+                when {
+                    selectedIndices.isEmpty() -> "Skip — Back to Home"
+                    selectedIndices.size == 1 -> "Start ${actions[selectedIndices.first()].title} — Back to Home"
+                    else -> "Start ${selectedIndices.size} actions — Back to Home"
+                },
                 style = MaterialTheme.typography.titleMedium,
             )
         }
+
+        Text(
+            "📵 Put your phone away for better recovery",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
 
         Spacer(modifier = Modifier.height(spacing.xxl))
     }
@@ -683,7 +729,7 @@ private fun CooldownReminderScreen(onDone: () -> Unit) {
         Spacer(modifier = Modifier.height(spacing.xxl))
 
         BrainPrimaryButton(
-            text = "Put phone down — Back to Home",
+            text = "Got it — reflect now",
             onClick = onDone,
             modifier = Modifier
                 .fillMaxWidth()
