@@ -27,6 +27,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.brainplaner.phone.LocalStore
+import com.brainplaner.phone.PhoneAwarenessService
 import com.brainplaner.phone.ui.budget.BudgetDetailScreen
 import com.brainplaner.phone.ui.home.DailyCheckInScreen
 import com.brainplaner.phone.ui.home.HomeScreen
@@ -193,6 +194,9 @@ fun AppNavigation(
                 ReflectionScreen(
                     viewModel = vm,
                     onDone = {
+                        if (sessionId.isNotBlank()) {
+                            PhoneAwarenessService.startCooldownForSession(application, sessionId)
+                        }
                         LocalStore.clearPendingReflectionRoute(application)
                         homeViewModel.refreshCloudData()
                         navController.navigate(Screen.Home.route) {
