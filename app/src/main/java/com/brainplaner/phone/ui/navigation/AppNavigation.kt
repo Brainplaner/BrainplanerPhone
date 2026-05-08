@@ -47,7 +47,7 @@ fun AppNavigation(
     apiUrl: String,
     userToken: String,
     getActiveSessionId: () -> String?,
-    onStartSession: suspend (plannedMinutes: Int) -> Result<String>,
+    onStartSession: suspend (plannedMinutes: Int, intentText: String?, intentConfirmed: Boolean) -> Result<String>,
     onStopSession: suspend () -> Result<String>,
     onPauseSession: suspend () -> Result<String>,
     onResumeSession: suspend () -> Result<String>,
@@ -134,13 +134,20 @@ fun AppNavigation(
                     onStartSession = onStartSession,
                     onStopSession = {
                         val sessionId = getActiveSessionId()
-                        val result = onStopSession()
-                        if (result.isSuccess && sessionId != null) {
+                        // Mark reflection pending BEFORE stopping so the awareness service
+                        // sees the flag and defers cooldown until reflection is submitted.
+                        if (sessionId != null) {
                             LocalStore.savePendingReflectionRoute(application, sessionId)
                             LocalStore.savePendingReflectionStage(application, LocalStore.REFLECTION_STAGE_FORM)
+                        }
+                        val result = onStopSession()
+                        if (result.isSuccess && sessionId != null) {
                             navController.navigate(Screen.Reflection.route(sessionId)) {
                                 popUpTo(Screen.Home.route)
                             }
+                        } else if (result.isFailure && sessionId != null) {
+                            // Stop failed — undo pending so cooldown isn't blocked forever.
+                            LocalStore.clearPendingReflectionRoute(application)
                         }
                         result
                     },
@@ -174,10 +181,7 @@ fun AppNavigation(
                 val progressViewModel: ProgressViewModel = viewModel(
                     factory = ProgressViewModel.factory(application, userId, apiUrl, userToken)
                 )
-                ProgressScreen(
-                    viewModel = progressViewModel,
-                    onBack = { navController.popBackStack() },
-                )
+                ProgressScreen(viewModel = progressViewModel)
             }
             composable(
                 route = Screen.Reflection.route,
@@ -195,10 +199,12 @@ fun AppNavigation(
                 ReflectionScreen(
                     viewModel = vm,
                     onDone = {
+                        // Clear the pending flag first, then kick off cooldown.
+                        // Cooldown was deferred while reflection was open; it now starts here.
+                        LocalStore.clearPendingReflectionRoute(application)
                         if (sessionId.isNotBlank()) {
                             PhoneAwarenessService.startCooldownForSession(application, sessionId)
                         }
-                        LocalStore.clearPendingReflectionRoute(application)
                         homeViewModel.refreshCloudData()
                         navController.navigate(Screen.Home.route) {
                             popUpTo(Screen.Home.route) { inclusive = true }

@@ -150,7 +150,9 @@ class MainActivity : ComponentActivity() {
                     apiUrl = CLOUD_API_URL,
                     userToken = userToken(),
                     getActiveSessionId = { activeSessionId },
-                    onStartSession = { minutes -> startSession(minutes) },
+                    onStartSession = { minutes, intent, confirmed ->
+                        startSession(minutes, intent, confirmed)
+                    },
                     onStopSession = { stopSession() },
                     onPauseSession = { pauseSession() },
                     onResumeSession = { resumeSession() },
@@ -178,7 +180,11 @@ class MainActivity : ComponentActivity() {
     }
 
     // LOCAL-FIRST session start: saves locally immediately, syncs to cloud in background.
-    private suspend fun startSession(plannedMinutes: Int = 60): Result<String> = withContext(Dispatchers.IO) {
+    private suspend fun startSession(
+        plannedMinutes: Int = 60,
+        intentText: String? = null,
+        intentConfirmed: Boolean = false,
+    ): Result<String> = withContext(Dispatchers.IO) {
         // Re-check notification permission right before tracking starts.
         withContext(Dispatchers.Main) {
             ensureNotificationPermission()
@@ -198,7 +204,15 @@ class MainActivity : ComponentActivity() {
 
         // 2. Try cloud sync in background — upgrade local ID to cloud ID if successful.
         try {
-            val json = """{"planned_minutes": $plannedMinutes}"""
+            val intentEscaped = intentText
+                ?.take(500)
+                ?.replace("\\", "\\\\")
+                ?.replace("\"", "\\\"")
+                ?.replace("\n", " ")
+                ?.takeIf { it.isNotBlank() }
+            val intentJson = if (intentEscaped != null) ""","intent_text":"$intentEscaped"""" else ""
+            val confirmedJson = if (intentConfirmed) ""","intent_confirmed":true""" else ""
+            val json = """{"planned_minutes": $plannedMinutes$intentJson$confirmedJson}"""
             val body = json.toRequestBody("application/json".toMediaType())
             val request = Request.Builder()
                 .url("$CLOUD_API_URL/sessions/start")
@@ -278,9 +292,13 @@ class MainActivity : ComponentActivity() {
         val stoppedId = id
         activeSessionId = null
         LocalStore.clearActiveSession(this@MainActivity)
-        // Don't stopService — that kills polling + in-memory state, so cooldown only
-        // runs if the user completes reflection. Hand the service straight into cooldown.
-        PhoneAwarenessService.startCooldownForSession(this@MainActivity, stoppedId)
+        // Tell the awareness service the active session is over so it stops logging events,
+        // but defer the cooldown timer until the reflection screen is closed — otherwise
+        // the time spent reflecting gets counted as post-session phone behavior.
+        sendBroadcast(Intent("com.brainplaner.phone.SESSION_ENDED").apply {
+            setPackage(packageName)
+            putExtra("session_id", stoppedId)
+        })
         android.util.Log.i("MainActivity", "Local session stopped: $stoppedId")
 
         // 2. Try cloud sync in background (only for cloud-synced sessions).

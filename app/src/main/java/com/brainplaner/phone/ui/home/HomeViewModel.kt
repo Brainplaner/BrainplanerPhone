@@ -19,6 +19,14 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.util.concurrent.TimeUnit
 
+data class ConfirmedRecoveryAction(
+    val id: String,
+    val type: String,
+    val emoji: String?,
+    val boostPoints: Int,
+    val confirmedAt: String,
+)
+
 data class HomeUiState(
     val isLoading: Boolean = true,
     val sessionSummary: String? = null,
@@ -27,6 +35,7 @@ data class HomeUiState(
     val readinessBreakdown: Map<String, Float> = emptyMap(),
     val readinessMessage: String? = null,
     val planningAccuracyLine: String? = null,
+    val lastDrainScore: Int? = null,
     val hasCheckedInToday: Boolean = false,
     val isCheckInSubmitting: Boolean = false,
     val checkInError: String? = null,
@@ -139,6 +148,7 @@ class HomeViewModel(
             readinessMessage = readinessData.message ?: current.readinessMessage,
             hasCheckedInToday = readinessData.hasCheckinToday || current.hasCheckedInToday,
             planningAccuracyLine = readinessData.planningLine ?: current.planningAccuracyLine,
+            lastDrainScore = readinessData.lastDrainScore ?: current.lastDrainScore,
             sessionSummary = brief.sessionSummary ?: current.sessionSummary,
             handoffNextAction = brief.handoffNextAction ?: current.handoffNextAction,
             insightEvidence = coaching.evidence ?: current.insightEvidence,
@@ -166,10 +176,15 @@ class HomeViewModel(
                 readinessScore = localScore.toString(),
             )
 
-            // Fire-and-forget cloud sync.
+            // Sync to cloud, then pull the server-computed readiness so the
+            // gauge replaces the local sleep-only estimate with the real
+            // Brain Budget (RHR, session load, drain/cooldown, calibration).
             launch(Dispatchers.IO) {
                 val synced = postCheckInToCloud(sleepHours, sleepScore, rhr)
-                if (synced) LocalStore.markCheckInSynced(ctx)
+                if (synced) {
+                    LocalStore.markCheckInSynced(ctx)
+                    tryEnrichFromCloud()
+                }
             }
         }
     }
@@ -271,6 +286,76 @@ class HomeViewModel(
             }
             onResult(successCount, actions.size)
         }
+    }
+
+    /** Fetch today's confirmed recovery actions (with ids) for the edit UI. */
+    fun fetchTodaysRecoveryActions(onResult: (List<ConfirmedRecoveryAction>) -> Unit) {
+        viewModelScope.launch {
+            val actions = withContext(Dispatchers.IO) {
+                try {
+                    val request = Request.Builder()
+                        .url("$apiUrl/readiness/recovery-actions")
+                        .get()
+                        .addHeader("Authorization", "Bearer $userToken")
+                        .addHeader("X-User-ID", userId)
+                        .build()
+                    client.newCall(request).execute().use { response ->
+                        if (!response.isSuccessful) return@use emptyList<ConfirmedRecoveryAction>()
+                        parseConfirmedRecoveryActions(response.body?.string().orEmpty())
+                    }
+                } catch (_: Exception) {
+                    emptyList()
+                }
+            }
+            onResult(actions)
+        }
+    }
+
+    /** Delete a confirmed recovery action and refresh readiness. */
+    fun deleteRecoveryAction(id: String, onResult: (Boolean) -> Unit) {
+        viewModelScope.launch {
+            val ok = withContext(Dispatchers.IO) {
+                try {
+                    val request = Request.Builder()
+                        .url("$apiUrl/readiness/recovery-action/$id")
+                        .delete()
+                        .addHeader("Authorization", "Bearer $userToken")
+                        .addHeader("X-User-ID", userId)
+                        .build()
+                    client.newCall(request).execute().use { it.isSuccessful }
+                } catch (_: Exception) {
+                    false
+                }
+            }
+            if (ok) {
+                val previousScore = _state.value.readinessScore
+                for (attempt in 0 until 3) {
+                    tryEnrichFromCloud()
+                    val nextScore = _state.value.readinessScore
+                    if (nextScore != null && nextScore != previousScore) break
+                    if (attempt < 2) delay(900L)
+                }
+            }
+            onResult(ok)
+        }
+    }
+
+    private fun parseConfirmedRecoveryActions(json: String): List<ConfirmedRecoveryAction> {
+        // Tiny ad-hoc parser — matches the style used elsewhere in this file.
+        val out = mutableListOf<ConfirmedRecoveryAction>()
+        val arrayMatch = Regex(""""actions"\s*:\s*\[(.*)]""", RegexOption.DOT_MATCHES_ALL).find(json) ?: return out
+        val body = arrayMatch.groupValues[1]
+        val objectRegex = Regex("""\{[^{}]*}""")
+        for (m in objectRegex.findAll(body)) {
+            val obj = m.value
+            val id = Regex(""""id"\s*:\s*"([^"]+)"""").find(obj)?.groupValues?.get(1) ?: continue
+            val type = Regex(""""action_type"\s*:\s*"([^"]+)"""").find(obj)?.groupValues?.get(1) ?: "recovery_break"
+            val emoji = Regex(""""emoji"\s*:\s*"([^"]+)"""").find(obj)?.groupValues?.get(1)
+            val boost = Regex(""""boost_points"\s*:\s*(\d+)""").find(obj)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+            val confirmedAt = Regex(""""confirmed_at"\s*:\s*"([^"]+)"""").find(obj)?.groupValues?.get(1) ?: ""
+            out += ConfirmedRecoveryAction(id, type, emoji, boost, confirmedAt)
+        }
+        return out
     }
 
     private suspend fun postRecoveryActionToCloud(
@@ -388,6 +473,7 @@ class HomeViewModel(
         val message: String? = null,
         val hasCheckinToday: Boolean = false,
         val planningLine: String? = null,
+        val lastDrainScore: Int? = null,
         val success: Boolean = false,
         val errorReason: String? = null,
     )
@@ -411,12 +497,15 @@ class HomeViewModel(
                         .find(body)?.groupValues?.get(1) == "true"
                     val line = buildPlanningAccuracyLine(body)
                     val breakdown = parseReadinessBreakdown(body)
+                    val lastDrain = Regex(""""last_drain_score"\s*:\s*(\d+)""")
+                        .find(body)?.groupValues?.get(1)?.toIntOrNull()
                     return@withContext ReadinessFetchResult(
                         score = score,
                         breakdown = breakdown,
                         message = message,
                         hasCheckinToday = hasCheckin,
                         planningLine = line,
+                        lastDrainScore = lastDrain,
                         success = true,
                     )
                 } else {

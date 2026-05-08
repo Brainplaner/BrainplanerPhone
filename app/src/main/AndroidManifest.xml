@@ -36,6 +36,19 @@
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
+        <!-- Notification Listener — counts notifications received during session/cooldown.
+             User must grant "Notification access" in Settings; permission is system-bound. -->
+        <service
+            android:name=".BrainplanerNotificationListener"
+            android:label="Brainplaner Notification Counter"
+            android:enabled="true"
+            android:exported="true"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
         <receiver
             android:name=".BootReceiver"
             android:enabled="true"

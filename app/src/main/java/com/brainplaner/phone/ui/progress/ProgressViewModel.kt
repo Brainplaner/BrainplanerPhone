@@ -39,7 +39,6 @@ data class DailyStatus(
 
 data class StreakSummary(
     val currentLabel: DayLabel,
-    val currentRun: Int,
     val greenCount: Int,
     val yellowCount: Int,
     val redCount: Int,
@@ -124,6 +123,32 @@ data class FollowThroughSummary(
     val windowHours: Float,
 )
 
+// One longitudinal pillar/mechanism trend line from /endurance/snapshot.
+// Mirrors services/endurance_compute.py TrendLine.
+data class TrendLine(
+    val pillar: String,                  // "readiness" | "eqm" | "consolidation" | "mechanism"
+    val mechanism: String,               // e.g. "consolidation_score", "sustained_attention_minutes_median"
+    val currentAvg: Float?,
+    val baselineAvg: Float?,
+    val delta: Float?,
+    val deltaPct: Float?,
+    val direction: String,               // "improving" | "stable" | "declining" | "insufficient_data"
+    val currentN: Int,
+    val baselineN: Int,
+)
+
+// Meta-pillar snapshot: trend lines across the three primary pillars
+// plus mechanism-named lines (see SCIENTIFIC_FOUNDATIONS §3 and §9).
+data class EnduranceSnapshot(
+    val windowDaysCurrent: Int,
+    val windowDaysBaseline: Int,
+    val pillars: List<TrendLine>,
+    val mechanisms: List<TrendLine>,
+) {
+    fun pillar(name: String): TrendLine? = pillars.firstOrNull { it.pillar == name }
+    fun mechanism(name: String): TrendLine? = mechanisms.firstOrNull { it.mechanism == name }
+}
+
 data class ProgressUiState(
     val isLoading: Boolean = true,
     val windowDays: Int = 30,
@@ -132,6 +157,7 @@ data class ProgressUiState(
     val productivity: ProductivitySummary? = null,
     val capacity: CapacitySummary? = null,
     val endurance: EnduranceSummary? = null,
+    val enduranceSnapshot: EnduranceSnapshot? = null,
     val followThrough: FollowThroughSummary? = null,
     val completionRatioTrend7d: Float? = null,
     val completionRatioTrend30d: Float? = null,
@@ -164,8 +190,14 @@ class ProgressViewModel(
     fun load(days: Int = 30) {
         viewModelScope.launch {
             _state.value = _state.value.copy(isLoading = true, errorReason = null)
-            val result = withContext(Dispatchers.IO) { fetch(days) }
-            _state.value = result
+            val base = withContext(Dispatchers.IO) { fetch(days) }
+            // Endurance snapshot is a separate endpoint. Fetch it after the
+            // primary /progress call so a partial failure on the snapshot
+            // doesn't blank out the whole screen.
+            val snapshot = if (base.errorReason == null) {
+                withContext(Dispatchers.IO) { fetchEnduranceSnapshot() }
+            } else null
+            _state.value = base.copy(enduranceSnapshot = snapshot)
         }
     }
 
@@ -198,13 +230,61 @@ class ProgressViewModel(
         }
     }
 
+    private fun fetchEnduranceSnapshot(): EnduranceSnapshot? {
+        return try {
+            val request = Request.Builder()
+                .url("$apiUrl/endurance/snapshot")
+                .get()
+                .addHeader("Authorization", "Bearer $userToken")
+                .addHeader("X-User-ID", userId)
+                .build()
+
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return null
+                val body = response.body?.string().orEmpty()
+                parseEnduranceSnapshot(JSONObject(body))
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun parseEnduranceSnapshot(root: JSONObject): EnduranceSnapshot {
+        fun parseTrendLines(key: String): List<TrendLine> {
+            val arr = root.optJSONArray(key) ?: return emptyList()
+            return buildList {
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    add(
+                        TrendLine(
+                            pillar = o.optString("pillar"),
+                            mechanism = o.optString("mechanism"),
+                            currentAvg = o.optNullableDouble("current_avg")?.toFloat(),
+                            baselineAvg = o.optNullableDouble("baseline_avg")?.toFloat(),
+                            delta = o.optNullableDouble("delta")?.toFloat(),
+                            deltaPct = o.optNullableDouble("delta_pct")?.toFloat(),
+                            direction = o.optString("direction", "insufficient_data"),
+                            currentN = o.optInt("current_n", 0),
+                            baselineN = o.optInt("baseline_n", 0),
+                        )
+                    )
+                }
+            }
+        }
+        return EnduranceSnapshot(
+            windowDaysCurrent = root.optInt("window_days_current", 14),
+            windowDaysBaseline = root.optInt("window_days_baseline", 28),
+            pillars = parseTrendLines("pillars"),
+            mechanisms = parseTrendLines("mechanisms"),
+        )
+    }
+
     private fun parse(body: String, requestedDays: Int): ProgressUiState {
         val root = JSONObject(body)
         val streakJson = root.optJSONObject("streak")
         val streak = streakJson?.let {
             StreakSummary(
                 currentLabel = DayLabel.fromString(it.optString("current_label")),
-                currentRun = it.optInt("current_run", 0),
                 greenCount = it.optInt("green_count", 0),
                 yellowCount = it.optInt("yellow_count", 0),
                 redCount = it.optInt("red_count", 0),

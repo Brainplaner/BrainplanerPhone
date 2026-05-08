@@ -66,6 +66,7 @@ class PhoneAwarenessService : Service() {
 
     private var sessionId: String? = null
     private var unlockCount = 0
+    private var notificationCount = 0
     private var screenOnSeconds = 0
     private var screenOnStartTime: Long? = null
     private var lastScreenState = "unknown"
@@ -92,6 +93,45 @@ class PhoneAwarenessService : Service() {
                     android.util.Log.i("PhoneAwareness", "Received resume signal, event logging resumed")
                     updateNotification()
                 }
+                BrainplanerNotificationListener.ACTION_NOTIFICATION_RECEIVED -> {
+                    val sourcePackage = intent.getStringExtra("source_package") ?: "unknown"
+                    if (isInCooldown) {
+                        // Feeds the Mark 2023 self-initiated/external decomposition of
+                        // cooldown unlocks in consolidation_compute.compute_consolidation_score
+                        // breakdown — interpretive only, NEVER folded into CBI or the
+                        // consolidation score formula (phone_usage.md backs the split,
+                        // not weights).
+                        cooldownNotificationCount++
+                        android.util.Log.i("PhoneAwareness", "Cooldown: notification from $sourcePackage (count=$cooldownNotificationCount)")
+                        logEvent("notification_received", mapOf(
+                            "notification_count" to cooldownNotificationCount,
+                            "source_package" to sourcePackage,
+                            "phase" to "cooldown"
+                        ))
+                        updateNotification()
+                    } else if (sessionId != null && !isSessionPaused) {
+                        notificationCount++
+                        android.util.Log.i("PhoneAwareness", "Event: notification from $sourcePackage (count=$notificationCount)")
+                        logEvent("notification_received", mapOf(
+                            "notification_count" to notificationCount,
+                            "source_package" to sourcePackage
+                        ))
+                        updateNotification()
+                    }
+                }
+                "com.brainplaner.phone.SESSION_ENDED" -> {
+                    // User pressed Stop. Clear active state so events stop logging,
+                    // but DO NOT start cooldown — that waits until reflection is closed.
+                    val endedSessionId = intent.getStringExtra("session_id")
+                    if (endedSessionId != null && sessionId == endedSessionId) {
+                        android.util.Log.i("PhoneAwareness", "Received session_ended for $endedSessionId — clearing active state, deferring cooldown until reflection closes")
+                        sessionId = null
+                        isAutoDetected = false
+                        isSessionPaused = false
+                        screenOnStartTime = null
+                        updateNotification()
+                    }
+                }
             }
         }
     }
@@ -99,11 +139,13 @@ class PhoneAwarenessService : Service() {
     // Cooldown tracking — continues after session ends to measure post-session behavior
     private val COOLDOWN_GRACE_PERIOD_MS = 10_000L // Wait before counting cooldown metrics
     private val COOLDOWN_DURATION_MS = 15 * 60 * 1000L // 15 minutes
+    private val COOLDOWN_TEST_MODE = false
     private var isInCooldown = false
     private var cooldownSessionId: String? = null  // session that triggered cooldown
     private var cooldownGraceStartTime: Long? = null
     private var cooldownStartTime: Long? = null
     private var cooldownUnlockCount = 0
+    private var cooldownNotificationCount = 0
     private var cooldownScreenOnSeconds = 0
     private var cooldownTimerJob: Job? = null
     private var timeToFirstPickupSeconds: Double? = null  // null = no pickup yet
@@ -231,10 +273,12 @@ class PhoneAwarenessService : Service() {
             addAction(Intent.ACTION_USER_PRESENT)
         }
 
-        // Register broadcast receiver for pause/resume signals
+        // Register broadcast receiver for pause/resume/ended signals + notification listener events
         val pauseResumeFilter = IntentFilter().apply {
             addAction("com.brainplaner.phone.SESSION_PAUSED")
             addAction("com.brainplaner.phone.SESSION_RESUMED")
+            addAction("com.brainplaner.phone.SESSION_ENDED")
+            addAction(BrainplanerNotificationListener.ACTION_NOTIFICATION_RECEIVED)
         }
 
         // Android 13+ requires explicit export flag for broadcast receivers
@@ -306,6 +350,7 @@ class PhoneAwarenessService : Service() {
                 android.util.Log.i("PhoneAwareness", "Upgraded local session to cloud id: $previousSessionId -> $newSessionId")
             } else {
                 unlockCount = 0
+                notificationCount = 0
                 screenOnSeconds = 0
                 screenOnStartTime = if (lastScreenState == "on") System.currentTimeMillis() else null
                 android.util.Log.i("PhoneAwareness", "Started tracking new session: $newSessionId")
@@ -389,6 +434,11 @@ class PhoneAwarenessService : Service() {
         val batchToSend = liveEventBatch.toList()
         liveEventBatch.clear()
 
+        if (COOLDOWN_TEST_MODE) {
+            android.util.Log.i("PhoneAwareness", "[TEST_MODE] Would sync-submit ${batchToSend.size} final events — skipped")
+            return
+        }
+
         try {
             val eventsJson = batchToSend.joinToString(",\n      ") { event ->
                 val metadataJson = (event["metadata"] as? Map<*, *>)?.let { meta ->
@@ -450,14 +500,20 @@ class PhoneAwarenessService : Service() {
 
         android.util.Log.i(
             "PhoneAwareness",
-            "Submitting phone metrics: unlocks=$unlockCount, screen_on=${screenOnSeconds}s"
+            "Submitting phone metrics: unlocks=$unlockCount, notifications=$notificationCount, screen_on=${screenOnSeconds}s"
         )
+
+        if (COOLDOWN_TEST_MODE) {
+            android.util.Log.i("PhoneAwareness", "[TEST_MODE] Would submit phone metrics — skipped")
+            return
+        }
 
         try {
             val json = """
                 {
                   "phone_unlock_count": $unlockCount,
-                  "phone_screen_on_seconds": $screenOnSeconds
+                  "phone_screen_on_seconds": $screenOnSeconds,
+                  "phone_notification_count": $notificationCount
                 }
             """.trimIndent()
 
@@ -499,7 +555,8 @@ class PhoneAwarenessService : Service() {
 
             val metrics = listOf(
                 """{"session_id":"$currentSessionId","user_id":"$userId","metric_key":"phone_unlock_count","value_num":$unlockCount,"unit":"count","observed_ts":"$timestamp","created_at":"$timestamp"}""",
-                """{"session_id":"$currentSessionId","user_id":"$userId","metric_key":"phone_screen_on_seconds","value_num":$screenOnSeconds,"unit":"seconds","observed_ts":"$timestamp","created_at":"$timestamp"}"""
+                """{"session_id":"$currentSessionId","user_id":"$userId","metric_key":"phone_screen_on_seconds","value_num":$screenOnSeconds,"unit":"seconds","observed_ts":"$timestamp","created_at":"$timestamp"}""",
+                """{"session_id":"$currentSessionId","user_id":"$userId","metric_key":"phone_notification_count","value_num":$notificationCount,"unit":"count","observed_ts":"$timestamp","created_at":"$timestamp"}"""
             )
 
             val json = "[${metrics.joinToString(",")}]"
@@ -540,6 +597,7 @@ class PhoneAwarenessService : Service() {
         cooldownGraceStartTime = System.currentTimeMillis()
         cooldownStartTime = null
         cooldownUnlockCount = 0
+        cooldownNotificationCount = 0
         cooldownScreenOnSeconds = 0
         screenOnStartTime = null
         timeToFirstPickupSeconds = null
@@ -590,8 +648,8 @@ class PhoneAwarenessService : Service() {
         android.util.Log.i(
             "PhoneAwareness",
             "=== Cooldown finished: session=$cdSessionId, unlocks=$cooldownUnlockCount, " +
-            "screen_on=${cooldownScreenOnSeconds}s, first_pickup=${timeToFirstPickupSeconds}s, " +
-            "duration=${actualCooldownSeconds}s ==="
+            "notifications=$cooldownNotificationCount, screen_on=${cooldownScreenOnSeconds}s, " +
+            "first_pickup=${timeToFirstPickupSeconds}s, duration=${actualCooldownSeconds}s ==="
         )
 
         // Flush remaining events
@@ -606,6 +664,7 @@ class PhoneAwarenessService : Service() {
             sessionId = cdSessionId,
             userId = userId,
             unlockCount = cooldownUnlockCount,
+            notificationCount = cooldownNotificationCount,
             screenOnSeconds = cooldownScreenOnSeconds,
             cooldownDurationSeconds = actualCooldownSeconds,
             timeToFirstPickupSeconds = timeToFirstPickupSeconds
@@ -617,11 +676,13 @@ class PhoneAwarenessService : Service() {
         cooldownGraceStartTime = null
         cooldownStartTime = null
         cooldownUnlockCount = 0
+        cooldownNotificationCount = 0
         cooldownScreenOnSeconds = 0
         screenOnStartTime = null
         cooldownTimerJob = null
         timeToFirstPickupSeconds = null
         unlockCount = 0
+        notificationCount = 0
         updateNotification()
 
         // Keep the service alive in polling mode after cooldown so the next session
@@ -651,6 +712,7 @@ class PhoneAwarenessService : Service() {
         cooldownGraceStartTime = null
         cooldownStartTime = null
         cooldownUnlockCount = 0
+        cooldownNotificationCount = 0
         cooldownScreenOnSeconds = 0
         timeToFirstPickupSeconds = null
         updateNotification()
@@ -660,10 +722,20 @@ class PhoneAwarenessService : Service() {
         sessionId: String,
         userId: String,
         unlockCount: Int,
+        notificationCount: Int,
         screenOnSeconds: Int,
         cooldownDurationSeconds: Int,
         timeToFirstPickupSeconds: Double?
     ) {
+        if (COOLDOWN_TEST_MODE) {
+            android.util.Log.i(
+                "PhoneAwareness",
+                "[TEST_MODE] Would submit cooldown: session=$sessionId, unlocks=$unlockCount, " +
+                "notifications=$notificationCount, screen=${screenOnSeconds}s, " +
+                "duration=${cooldownDurationSeconds}s, first_pickup=${timeToFirstPickupSeconds}s — skipped (no DB write)"
+            )
+            return
+        }
         // Try Cloud API first
         try {
             val firstPickupJson = timeToFirstPickupSeconds?.let { "$it" } ?: "null"
@@ -672,7 +744,8 @@ class PhoneAwarenessService : Service() {
                   "cooldown_unlock_count": $unlockCount,
                   "cooldown_screen_on_seconds": $screenOnSeconds,
                   "cooldown_duration_seconds": $cooldownDurationSeconds,
-                  "time_to_first_pickup_seconds": $firstPickupJson
+                  "time_to_first_pickup_seconds": $firstPickupJson,
+                  "cooldown_notification_count": $notificationCount
                 }
             """.trimIndent()
 
@@ -700,13 +773,14 @@ class PhoneAwarenessService : Service() {
 
         // Fallback: submit cooldown metrics directly to Supabase session_metrics
         android.util.Log.i("PhoneAwareness", "Falling back to Supabase for cooldown metrics")
-        submitCooldownMetricsToSupabase(sessionId, userId, unlockCount, screenOnSeconds, cooldownDurationSeconds, timeToFirstPickupSeconds)
+        submitCooldownMetricsToSupabase(sessionId, userId, unlockCount, notificationCount, screenOnSeconds, cooldownDurationSeconds, timeToFirstPickupSeconds)
     }
 
     private fun submitCooldownMetricsToSupabase(
         sessionId: String,
         userId: String,
         unlockCount: Int,
+        notificationCount: Int,
         screenOnSeconds: Int,
         cooldownDurationSeconds: Int,
         timeToFirstPickupSeconds: Double?
@@ -771,6 +845,28 @@ class PhoneAwarenessService : Service() {
                 } else {
                     val errorBody = response.body?.string() ?: ""
                     android.util.Log.e("PhoneAwareness", "✗ Supabase cooldown fallback failed: ${response.code} - $errorBody")
+                }
+            }
+
+            // Dual-write cooldown_notification_count to session_metrics so the
+            // /backfill/cooldowns route can recover it on legacy rows. The primary
+            // path writes it to session_cooldowns.cooldown_notification_count; the
+            // server uses it only for the Mark 2023 unlock decomposition, never
+            // for the CBI or consolidation_score formula.
+            val metricRow = """[{"session_id":"$sessionId","user_id":"$userId","metric_key":"cooldown_notification_count","value_num":$notificationCount,"unit":"count","observed_ts":"$timestamp","created_at":"$timestamp"}]"""
+            val metricBody = metricRow.toRequestBody("application/json".toMediaType())
+            val metricRequest = Request.Builder()
+                .url("$SUPABASE_URL/rest/v1/session_metrics")
+                .post(metricBody)
+                .addHeader("apikey", SUPABASE_ANON_KEY)
+                .addHeader("Authorization", "Bearer ${userToken()}")
+                .addHeader("Content-Type", "application/json")
+                .addHeader("Prefer", "return=minimal")
+                .build()
+            client.newCall(metricRequest).execute().use { response ->
+                if (!response.isSuccessful) {
+                    val errorBody = response.body?.string() ?: ""
+                    android.util.Log.e("PhoneAwareness", "✗ Supabase cooldown_notification_count metric failed: ${response.code} - $errorBody")
                 }
             }
         } catch (e: Exception) {
@@ -932,6 +1028,12 @@ class PhoneAwarenessService : Service() {
                         isSessionPaused = false
                         updateNotification()
                     }
+                    remoteStatus == "active" && sessionId != remoteId
+                            && LocalStore.getPendingReflectionRouteSessionId(this@PhoneAwarenessService) == remoteId -> {
+                        // Session was just stopped locally; cloud /end hasn't synced yet, so the
+                        // poll still reports "active". Don't re-track — reflection is pending.
+                        android.util.Log.d("PhoneAwareness", "Ignoring stale active poll for $remoteId — reflection pending")
+                    }
                     remoteStatus == "active" && sessionId != remoteId -> {
                         // New session started remotely (by PC) or detected on startup
                         android.util.Log.i("PhoneAwareness", "Auto-detected new session: $remoteId (was: $sessionId)")
@@ -943,6 +1045,7 @@ class PhoneAwarenessService : Service() {
                         isAutoDetected = true
                         isSessionPaused = false
                         unlockCount = 0
+                        notificationCount = 0
                         screenOnSeconds = 0
                         screenOnStartTime = if (lastScreenState == "on") System.currentTimeMillis() else null
 
@@ -962,16 +1065,24 @@ class PhoneAwarenessService : Service() {
                         updateNotification()
                     }
                     remoteStatus != "active" && remoteStatus != "paused" && sessionId != null && sessionId == remoteId && !isInCooldown -> {
-                        // Session truly ended (completed/cancelled) — enter cooldown phase
-                        android.util.Log.i("PhoneAwareness", "Session completed: $sessionId — entering cooldown phase (${ COOLDOWN_DURATION_MS / 60000 } min)")
-                        val completedSessionId = sessionId
+                        // Session truly ended (completed/cancelled).
+                        val completedSessionId = sessionId!!
+                        val pendingReflection = LocalStore.getPendingReflectionRouteSessionId(this@PhoneAwarenessService)
+
                         sessionId = null  // no longer an active session
                         isAutoDetected = false
                         isSessionPaused = false
+                        screenOnStartTime = null
 
-                        // Start cooldown tracking
-                        startCooldown(completedSessionId!!)
-                        markCooldownHandled(completedSessionId)
+                        if (pendingReflection == completedSessionId) {
+                            // Reflection still open — cooldown will start when reflection closes.
+                            android.util.Log.i("PhoneAwareness", "Session completed: $completedSessionId — deferring cooldown until reflection is submitted")
+                            updateNotification()
+                        } else {
+                            android.util.Log.i("PhoneAwareness", "Session completed: $completedSessionId — entering cooldown phase (${ COOLDOWN_DURATION_MS / 60000 } min)")
+                            startCooldown(completedSessionId)
+                            markCooldownHandled(completedSessionId)
+                        }
 
                         sendBroadcast(Intent("com.brainplaner.phone.SESSION_AUTO_STOPPED").apply {
                             setPackage(packageName)
@@ -985,12 +1096,20 @@ class PhoneAwarenessService : Service() {
                             && cooldownSessionId == null
                             && !wasCooldownHandled(remoteId)
                             && isRecentlyEnded(remoteEndTs) -> {
-                        android.util.Log.i(
-                            "PhoneAwareness",
-                            "Catch-up: completed session $remoteId never observed active — starting cooldown anyway (end_ts=$remoteEndTs)"
-                        )
-                        startCooldown(remoteId)
-                        markCooldownHandled(remoteId)
+                        val pendingReflection = LocalStore.getPendingReflectionRouteSessionId(this@PhoneAwarenessService)
+                        if (pendingReflection == remoteId) {
+                            android.util.Log.i(
+                                "PhoneAwareness",
+                                "Catch-up: completed session $remoteId has pending reflection — deferring cooldown"
+                            )
+                        } else {
+                            android.util.Log.i(
+                                "PhoneAwareness",
+                                "Catch-up: completed session $remoteId never observed active — starting cooldown anyway (end_ts=$remoteEndTs)"
+                            )
+                            startCooldown(remoteId)
+                            markCooldownHandled(remoteId)
+                        }
                     }
                 }
             }
@@ -1047,6 +1166,11 @@ class PhoneAwarenessService : Service() {
         val batchToSend = liveEventBatch.toList()
         liveEventBatch.clear()
         lastBatchSubmitTime = System.currentTimeMillis()
+
+        if (COOLDOWN_TEST_MODE) {
+            android.util.Log.i("PhoneAwareness", "[TEST_MODE] Would submit ${batchToSend.size} live events — skipped")
+            return
+        }
 
         android.util.Log.i("PhoneAwareness", "Submitting batch of ${batchToSend.size} phone events to Cloud API")
 
@@ -1105,6 +1229,10 @@ class PhoneAwarenessService : Service() {
     }
 
     private fun logEventToSupabase(currentSessionId: String, eventType: String, timestamp: String, metadata: Map<String, Any>) {
+        if (COOLDOWN_TEST_MODE) {
+            android.util.Log.d("PhoneAwareness", "[TEST_MODE] Would log $eventType to Supabase — skipped")
+            return
+        }
         serviceScope.launch(Dispatchers.IO) {
             try {
                 val metadataJson = if (metadata.isEmpty()) {

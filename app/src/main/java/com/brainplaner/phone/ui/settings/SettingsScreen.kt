@@ -16,16 +16,21 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import com.brainplaner.phone.BrainplanerNotificationListener
 import com.brainplaner.phone.LocalStore
 import com.brainplaner.phone.ui.components.BrainCard
 import com.brainplaner.phone.ui.components.BrainChoiceChip
@@ -205,6 +210,51 @@ fun SettingsScreen(
                 BrainPrimaryButton(
                     text = "Run Reaction Test",
                     onClick = onRunWarmup,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(spacing.xl))
+
+        // ── Permissions ──
+        Text(
+            "PERMISSIONS",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            letterSpacing = 2.sp,
+        )
+        Spacer(modifier = Modifier.height(spacing.xs))
+
+        var notifAccessGranted by remember {
+            mutableStateOf(BrainplanerNotificationListener.isPermissionGranted(context))
+        }
+        val lifecycleOwner = LocalLifecycleOwner.current
+        DisposableEffect(lifecycleOwner) {
+            val observer = LifecycleEventObserver { _, event ->
+                if (event == Lifecycle.Event.ON_RESUME) {
+                    notifAccessGranted = BrainplanerNotificationListener.isPermissionGranted(context)
+                }
+            }
+            lifecycleOwner.lifecycle.addObserver(observer)
+            onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+        }
+
+        BrainCard(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(spacing.md)) {
+                Text("Notification Access", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    if (notifAccessGranted)
+                        "Granted. Brainplaner counts notifications you receive during sessions and the post-session cooldown."
+                    else
+                        "Not granted. Without this, Brainplaner can't measure how many notifications interrupted your focus — the single largest documented attention cost.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(modifier = Modifier.height(spacing.sm))
+                BrainPrimaryButton(
+                    text = if (notifAccessGranted) "Manage in System Settings" else "Grant Access",
+                    onClick = { BrainplanerNotificationListener.openPermissionSettings(context) },
                     modifier = Modifier.fillMaxWidth(),
                 )
             }

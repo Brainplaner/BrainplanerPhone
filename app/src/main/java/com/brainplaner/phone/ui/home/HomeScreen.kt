@@ -69,7 +69,7 @@ private val DURATION_OPTIONS = listOf(15, 30, 45, 60, 120)
 @Composable
 fun HomeScreen(
     viewModel: HomeViewModel,
-    onStartSession: suspend (plannedMinutes: Int) -> Result<String>,
+    onStartSession: suspend (plannedMinutes: Int, intentText: String?, intentConfirmed: Boolean) -> Result<String>,
     onStopSession: suspend () -> Result<String>,
     onPauseSession: suspend () -> Result<String>,
     onResumeSession: suspend () -> Result<String>,
@@ -110,10 +110,24 @@ fun HomeScreen(
         if (!isSessionActive) plannedMinutes = suggested
     }
 
-    val startSessionAction: () -> Unit = {
+    // ── Continuity-confirmation gate state ──
+    // intentText is editable; defaults to the prior session's handoff_next_action
+    // when one is present. The user must tap "Confirm & start" for intent_confirmed
+    // to flow to the cloud — that's what the plan_execution_score's continuity
+    // factor reads (Gollwitzer rehearsal moderator).
+    var intentText by remember { mutableStateOf("") }
+    var hasUserEditedIntent by remember { mutableStateOf(false) }
+    LaunchedEffect(state.handoffNextAction) {
+        if (!hasUserEditedIntent) {
+            intentText = state.handoffNextAction.orEmpty()
+        }
+    }
+
+    val startSessionAction: (confirmed: Boolean) -> Unit = { confirmed ->
         scope.launch {
             isActionLoading = true
-            val result = onStartSession(plannedMinutes)
+            val trimmedIntent = intentText.trim().ifEmpty { null }
+            val result = onStartSession(plannedMinutes, trimmedIntent, confirmed)
             actionMessage = result.fold(
                 onSuccess = {
                     activePlannedMinutes = plannedMinutes
@@ -359,39 +373,70 @@ fun HomeScreen(
             Spacer(modifier = Modifier.height(spacing.md))
         }
 
-        // ── Continuity / handoff card ──
-        BrainCard(
-            modifier = Modifier.fillMaxWidth(),
-            containerColor = BrainplanerTheme.surfaceRoles.surface2,
-        ) {
-            Column(modifier = Modifier.padding(spacing.md)) {
-                Text(
-                    "CONTINUITY",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    letterSpacing = 2.sp,
-                )
-                Spacer(modifier = Modifier.height(8.dp))
+        // ── Continuity / intent card (editable) ──
+        // Shown only when no session is running. The continuity card is now
+        // an active commitment surface: prior handoff prefills the field, the
+        // user can edit, and the primary button below records intent_confirmed
+        // → drives the plan_execution_score continuity factor.
+        if (!isSessionActive) {
+            val cameFromHandoff = !state.handoffNextAction.isNullOrBlank()
+            BrainCard(
+                modifier = Modifier.fillMaxWidth(),
+                containerColor = BrainplanerTheme.surfaceRoles.surface2,
+            ) {
+                Column(modifier = Modifier.padding(spacing.md)) {
+                    Text(
+                        if (cameFromHandoff) "CONTINUITY" else "INTENT",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        letterSpacing = 2.sp,
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
 
-                if (state.isLoading) {
-                    CircularProgressIndicator(modifier = Modifier.size(20.dp))
-                } else {
-                    state.sessionSummary?.let {
-                        Text(it, style = MaterialTheme.typography.bodyMedium)
-                    }
-                    state.handoffNextAction?.let {
-                        Text(
-                            "▸ Next: $it",
-                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
-                            color = MaterialTheme.colorScheme.primary,
+                    if (state.isLoading) {
+                        CircularProgressIndicator(modifier = Modifier.size(20.dp))
+                    } else {
+                        state.sessionSummary?.let {
+                            Text(
+                                it,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                        }
+
+                        androidx.compose.material3.OutlinedTextField(
+                            value = intentText,
+                            onValueChange = {
+                                intentText = it.take(500)
+                                hasUserEditedIntent = true
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            placeholder = {
+                                Text(
+                                    if (cameFromHandoff)
+                                        "Edit if you're shifting focus…"
+                                    else
+                                        "What are you focusing on this session?",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            },
+                            textStyle = MaterialTheme.typography.bodyMedium,
+                            shape = RoundedCornerShape(BrainplanerTheme.radius.sm),
+                            minLines = 2,
+                            maxLines = 4,
+                            enabled = !isActionLoading,
                         )
-                    }
-                    if (state.sessionSummary == null && state.handoffNextAction == null) {
-                        Text(
-                            "No previous session — start your first one!",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
+
+                        if (cameFromHandoff && intentText.trim() != state.handoffNextAction?.trim()) {
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                "Edited from prior handoff",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                     }
                 }
             }
@@ -431,12 +476,16 @@ fun HomeScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
 
+            // Primary path: confirm the intent above and start. Sends
+            // intent_confirmed=true so the session contributes a full
+            // continuity factor to its plan_execution_score.
+            val canConfirm = intentText.trim().isNotEmpty()
             Button(
                 onClick = {
-                    if (isActionLoading) return@Button
-                    startSessionAction()
+                    if (isActionLoading || !canConfirm) return@Button
+                    startSessionAction(true)
                 },
-                enabled = !isActionLoading,
+                enabled = !isActionLoading && canConfirm,
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(56.dp),
@@ -452,8 +501,30 @@ fun HomeScreen(
                         color = MaterialTheme.colorScheme.onPrimary,
                     )
                 } else {
-                    Text("Start Session", style = MaterialTheme.typography.titleLarge)
+                    Text(
+                        "Confirm & start ${plannedMinutes}m",
+                        style = MaterialTheme.typography.titleMedium,
+                    )
                 }
+            }
+
+            // Escape valve: start without committing to the intent text.
+            // intent_confirmed=false → continuity factor = 0 in plan_execution.
+            // Kept available so the gate doesn't block users who genuinely
+            // don't want to commit (or have nothing to type).
+            TextButton(
+                onClick = {
+                    if (isActionLoading) return@TextButton
+                    startSessionAction(false)
+                },
+                enabled = !isActionLoading,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    "Start without confirming",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         } else {
             // ── Active session with timer ring ──

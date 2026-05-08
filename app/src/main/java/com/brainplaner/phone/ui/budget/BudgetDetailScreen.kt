@@ -1,5 +1,6 @@
 package com.brainplaner.phone.ui.budget
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,14 +17,27 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -34,12 +48,16 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.brainplaner.phone.LocalStore
 import com.brainplaner.phone.ui.components.BrainBudgetGauge
+import com.brainplaner.phone.ui.home.ConfirmedRecoveryAction
 import com.brainplaner.phone.ui.home.HomeViewModel
+import com.brainplaner.phone.ui.reflection.RecoveryAction
+import com.brainplaner.phone.ui.reflection.buildRecoveryActions
 import com.brainplaner.phone.ui.theme.BrainplanerTheme
 import com.brainplaner.phone.ui.theme.BudgetGreen
 import com.brainplaner.phone.ui.theme.BudgetRed
 import com.brainplaner.phone.ui.theme.BudgetYellow
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun BudgetDetailScreen(
     viewModel: HomeViewModel,
@@ -50,8 +68,16 @@ fun BudgetDetailScreen(
     val context = LocalContext.current
     val score = state.readinessScore?.toIntOrNull() ?: 0
 
+    var recoveryExpanded by remember { mutableStateOf(false) }
+    var confirmedActions by remember { mutableStateOf<List<ConfirmedRecoveryAction>>(emptyList()) }
+    var pickerOpen by remember { mutableStateOf(false) }
+    var refreshTick by remember { mutableStateOf(0) }
+
     LaunchedEffect(Unit) {
         viewModel.refreshCloudData()
+    }
+    LaunchedEffect(refreshTick) {
+        viewModel.fetchTodaysRecoveryActions { confirmedActions = it }
     }
 
     val breakdown = state.readinessBreakdown
@@ -82,35 +108,33 @@ fun BudgetDetailScreen(
         if (breakdown.containsKey("cooldown_index")) add(SubFactor("Cooldown", loadCooldownAdj.toInt()))
     }
 
-    val categories = listOf(
-        Category(
-            emoji = "🌙",
-            title = "Health",
-            valueLabel = signedLabel(healthAdj),
-            points = healthAdj,
-            description = if (healthSubFactors.isEmpty()) "Complete your morning check-in" else "Sleep + sleep quality + RHR baseline impact",
-            subFactors = healthSubFactors,
-        ),
-        Category(
-            emoji = "⚡",
-            title = "Load",
-            valueLabel = signedLabel(loadAdj),
-            points = loadAdj,
-            description = state.planningAccuracyLine ?: "Session load + drain score + cooldown behavior impact",
-            subFactors = loadSubFactors,
-        ),
-        Category(
-            emoji = "💚",
-            title = "Recovery",
-            valueLabel = if (hasRecoveryBoost) signedLabel(recoveryAdj) else "TIP",
-            points = recoveryAdj,
-            description = when {
-                hasRecoveryBoost -> "Confirmed recovery actions boosting today\'s budget"
-                !state.readinessMessage.isNullOrBlank() -> state.readinessMessage.orEmpty()
-                pendingRecovery != null -> "${pendingRecovery.type} available - confirm on home screen"
-                else -> "Follow the readiness guidance and add recovery after demanding sessions"
-            },
-        ),
+    val healthCategory = Category(
+        emoji = "🌙",
+        title = "Health",
+        valueLabel = signedLabel(healthAdj),
+        points = healthAdj,
+        description = if (healthSubFactors.isEmpty()) "Complete your morning check-in" else "Sleep + sleep quality + RHR baseline impact",
+        subFactors = healthSubFactors,
+    )
+    val loadCategory = Category(
+        emoji = "⚡",
+        title = "Load",
+        valueLabel = signedLabel(loadAdj),
+        points = loadAdj,
+        description = state.planningAccuracyLine ?: "Session load + drain score + cooldown behavior impact",
+        subFactors = loadSubFactors,
+    )
+    val recoveryCategory = Category(
+        emoji = "💚",
+        title = "Recovery",
+        valueLabel = if (hasRecoveryBoost) signedLabel(recoveryAdj) else "TIP",
+        points = recoveryAdj,
+        description = when {
+            hasRecoveryBoost -> "Confirmed recovery actions boosting today's budget"
+            !state.readinessMessage.isNullOrBlank() -> state.readinessMessage.orEmpty()
+            pendingRecovery != null -> "${pendingRecovery.type} available - confirm on home screen"
+            else -> "Follow the readiness guidance and add recovery after demanding sessions"
+        },
     )
 
     Column(
@@ -158,7 +182,7 @@ fun BudgetDetailScreen(
                 score >= 80 -> "Fully charged - great day for deep work"
                 score >= 60 -> "Good capacity - pace yourself"
                 score >= 40 -> "Moderate - lighter tasks recommended"
-                score >= 20 -> "Low energy - protect what\'s left"
+                score >= 20 -> "Low energy - protect what's left"
                 else -> "Depleted - rest is the priority"
             },
             style = MaterialTheme.typography.bodyMedium,
@@ -170,7 +194,7 @@ fun BudgetDetailScreen(
         Spacer(modifier = Modifier.height(spacing.xl))
 
         Text(
-            text = "TODAY\'S BREAKDOWN",
+            text = "TODAY'S BREAKDOWN",
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -183,15 +207,33 @@ fun BudgetDetailScreen(
             modifier = Modifier.fillMaxWidth(),
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
-                categories.forEachIndexed { index, category ->
-                    if (index > 0) {
-                        HorizontalDivider(
-                            modifier = Modifier.padding(vertical = 12.dp),
-                            color = MaterialTheme.colorScheme.outline.copy(alpha = 0.15f),
-                        )
-                    }
-
-                    CategoryRow(category = category)
+                CategoryRow(category = healthCategory)
+                HorizontalDivider(
+                    modifier = Modifier.padding(vertical = 12.dp),
+                    color = MaterialTheme.colorScheme.outline.copy(alpha = 0.15f),
+                )
+                CategoryRow(category = loadCategory)
+                HorizontalDivider(
+                    modifier = Modifier.padding(vertical = 12.dp),
+                    color = MaterialTheme.colorScheme.outline.copy(alpha = 0.15f),
+                )
+                CategoryRow(
+                    category = recoveryCategory,
+                    expandable = true,
+                    expanded = recoveryExpanded,
+                    onClick = { recoveryExpanded = !recoveryExpanded },
+                )
+                if (recoveryExpanded) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    RecoveryEditList(
+                        actions = confirmedActions,
+                        onRemove = { id ->
+                            viewModel.deleteRecoveryAction(id) { ok ->
+                                if (ok) refreshTick++
+                            }
+                        },
+                        onAdd = { pickerOpen = true },
+                    )
                 }
             }
         }
@@ -220,12 +262,170 @@ fun BudgetDetailScreen(
 
         Spacer(modifier = Modifier.height(spacing.xxl))
     }
+
+    if (pickerOpen) {
+        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        // Scale boosts to today's last drain when known; otherwise medium tier.
+        val drainForPicker = state.lastDrainScore ?: 3
+        ModalBottomSheet(
+            onDismissRequest = { pickerOpen = false },
+            sheetState = sheetState,
+            containerColor = BrainplanerTheme.surfaceRoles.surface2,
+        ) {
+            RecoveryAddPicker(
+                options = buildRecoveryActions(drainForPicker),
+                onPick = { picked ->
+                    pickerOpen = false
+                    viewModel.confirmRecoveryAction(
+                        type = picked.title,
+                        emoji = picked.emoji,
+                        boostPoints = picked.boostPoints,
+                        selectedAtMs = System.currentTimeMillis(),
+                    ) { ok ->
+                        if (ok) refreshTick++
+                    }
+                },
+                onDismiss = { pickerOpen = false },
+            )
+        }
+    }
 }
 
 @Composable
-private fun CategoryRow(category: Category) {
+private fun RecoveryEditList(
+    actions: List<ConfirmedRecoveryAction>,
+    onRemove: (String) -> Unit,
+    onAdd: () -> Unit,
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        if (actions.isEmpty()) {
+            Text(
+                text = "No recovery actions logged today.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 40.dp, bottom = 4.dp),
+            )
+        } else {
+            actions.forEach { action ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 40.dp, top = 4.dp, bottom = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(action.emoji ?: "💚", fontSize = 18.sp)
+                    Text(
+                        text = prettyType(action.type),
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Text(
+                        text = "+${action.boostPoints}",
+                        style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                        color = BudgetGreen,
+                    )
+                    IconButton(
+                        onClick = { onRemove(action.id) },
+                        modifier = Modifier.size(28.dp),
+                    ) {
+                        Icon(
+                            Icons.Filled.Close,
+                            contentDescription = "Remove",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(16.dp),
+                        )
+                    }
+                }
+            }
+        }
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 40.dp, top = 6.dp)
+                .clickable(onClick = onAdd),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Icon(
+                Icons.Filled.Add,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(18.dp),
+            )
+            Text(
+                text = "Add recovery action",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.primary,
+            )
+        }
+    }
+}
+
+@Composable
+private fun RecoveryAddPicker(
+    options: List<RecoveryAction>,
+    onPick: (RecoveryAction) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val spacing = BrainplanerTheme.spacing
+    Column(modifier = Modifier.padding(spacing.lg)) {
+        Text(
+            text = "Add recovery action",
+            style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.primary,
+        )
+        Spacer(modifier = Modifier.height(spacing.sm))
+        options.forEach { opt ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onPick(opt) }
+                    .padding(vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Text(opt.emoji, fontSize = 24.sp)
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(opt.title, style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        opt.duration,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Text(
+                    "+${opt.boostPoints}",
+                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                    color = BudgetGreen,
+                )
+            }
+        }
+        Spacer(modifier = Modifier.height(spacing.xs))
+        TextButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) {
+            Text("Cancel")
+        }
+    }
+}
+
+private fun prettyType(type: String): String =
+    type.replace('_', ' ').replaceFirstChar { it.uppercase() }
+
+@Composable
+private fun CategoryRow(
+    category: Category,
+    expandable: Boolean = false,
+    expanded: Boolean = false,
+    onClick: (() -> Unit)? = null,
+) {
+    val rowModifier = if (onClick != null) {
+        Modifier.fillMaxWidth().clickable(onClick = onClick)
+    } else {
+        Modifier.fillMaxWidth()
+    }
     Row(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = rowModifier,
         verticalAlignment = Alignment.Top,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
@@ -269,6 +469,14 @@ private fun CategoryRow(category: Category) {
             style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
             color = pointsColor(category.points),
         )
+        if (expandable) {
+            Icon(
+                imageVector = if (expanded) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
+                contentDescription = if (expanded) "Collapse" else "Expand",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(20.dp),
+            )
+        }
     }
 }
 
